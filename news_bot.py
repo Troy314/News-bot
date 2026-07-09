@@ -3,9 +3,9 @@ Discord News Scraper Bot
 =========================
 
 Follows particle-physics / gravitational-wave news sources and:
-  1. Posts them on demand with a command  ->  !news <site>
-  2. Automatically checks every N minutes and posts new articles to a
-     configured channel, avoiding duplicates.
+  1. Posts them on demand with a command  ->  !news <site> / !digest
+  2. Automatically posts an HTML digest of every source to a configured
+     channel every morning, pinging @everyone.
 
 Two kinds of sources are supported (see SOURCES below):
   - "rss":  a straight RSS/Atom feed URL. Preferred whenever a site has one,
@@ -19,7 +19,10 @@ SETUP
 1. pip install -r requirements.txt   (discord.py, requests, beautifulsoup4)
 2. Create a `.env` file (or set env vars) with:
        DISCORD_TOKEN=your_bot_token_here
-       NEWS_CHANNEL_ID=123456789012345678   # channel for auto-posts
+       NEWS_CHANNEL_ID=123456789012345678   # channel for the daily digest post
+       DIGEST_TIMEZONE=Europe/Paris          # IANA tz name, default Europe/Paris
+       DIGEST_HOUR=9                          # local hour (0-23), default 9
+       DIGEST_MINUTE=0                        # local minute, default 0
 3. Edit the SOURCES dict below to add/remove sources.
 4. Run:  python news_bot.py
 
@@ -60,12 +63,12 @@ Example for a fictional site where each article looks like:
 import os
 import io
 import re
-import json
 import asyncio
 import logging
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dtime
 from email.utils import parsedate_to_datetime
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -81,10 +84,11 @@ load_dotenv()
 # --------------------------------------------------------------------------
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "PUT_YOUR_TOKEN_HERE")
-NEWS_CHANNEL_ID = int(os.environ.get("NEWS_CHANNEL_ID", "0"))  # channel for auto-posts
-CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "15"))
+NEWS_CHANNEL_ID = int(os.environ.get("NEWS_CHANNEL_ID", "0"))  # channel for the daily digest post
+DIGEST_TIMEZONE = ZoneInfo(os.environ.get("DIGEST_TIMEZONE", "Europe/Paris"))
+DIGEST_HOUR = int(os.environ.get("DIGEST_HOUR", "9"))
+DIGEST_MINUTE = int(os.environ.get("DIGEST_MINUTE", "0"))
 COMMAND_PREFIX = "!"
-SEEN_LINKS_FILE = "seen_links.json"
 MAX_ARTICLES_PER_FETCH = 10   # how many articles to grab from a source
 REQUEST_TIMEOUT = 10         # seconds
 USER_AGENT = "Mozilla/5.0 (compatible; NewsScraperBot/1.0)"
@@ -363,15 +367,26 @@ def parse_feed_items(content: bytes):
 
 def scrape_rss(site_name: str) -> list[Article]:
     config = SOURCES[site_name]
-    content = fetch_bytes(config["url"], config.get("user_agent", USER_AGENT))
+    user_agent = config.get("user_agent", USER_AGENT)
+    content = fetch_bytes(config["url"], user_agent)
     if not content:
         return []
 
     try:
         entries = list(parse_feed_items(content))
     except ET.ParseError as e:
-        logger.error(f"Failed to parse feed for {site_name}: {e}")
-        return []
+        # Some sources intermittently return a truncated/malformed response
+        # (rate limiting, a transient proxy error, etc) -- one retry clears
+        # most of these rather than losing the source for this whole cycle.
+        logger.warning(f"Feed for {site_name} failed to parse ({e}), retrying once...")
+        content = fetch_bytes(config["url"], user_agent)
+        if not content:
+            return []
+        try:
+            entries = list(parse_feed_items(content))
+        except ET.ParseError as e2:
+            logger.error(f"Failed to parse feed for {site_name}: {e2}")
+            return []
 
     return [
         Article(
@@ -495,28 +510,6 @@ def resolve_source(name: str) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# SEEN-LINKS PERSISTENCE (avoids re-posting the same article)
-# --------------------------------------------------------------------------
-
-def load_seen_links() -> set[str]:
-    if os.path.exists(SEEN_LINKS_FILE):
-        try:
-            with open(SEEN_LINKS_FILE, "r") as f:
-                return set(json.load(f))
-        except (json.JSONDecodeError, IOError):
-            logger.warning("Could not read seen_links.json, starting fresh.")
-    return set()
-
-
-def save_seen_links(seen: set[str]) -> None:
-    try:
-        with open(SEEN_LINKS_FILE, "w") as f:
-            json.dump(list(seen), f)
-    except IOError as e:
-        logger.error(f"Could not save seen links: {e}")
-
-
-# --------------------------------------------------------------------------
 # DISCORD BOT
 # --------------------------------------------------------------------------
 
@@ -524,7 +517,6 @@ intents = discord.Intents.default()
 intents.message_content = True  # needed to read command text
 
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
-seen_links: set[str] = set()
 
 
 def make_embed(article: Article) -> discord.Embed:
@@ -542,12 +534,11 @@ def make_embed(article: Article) -> discord.Embed:
 
 @bot.event
 async def on_ready():
-    global seen_links
-    seen_links = load_seen_links()
     logger.info(f"Logged in as {bot.user} (id={bot.user.id})")
     logger.info(f"Configured sources: {', '.join(SOURCES.keys()) or '(none configured)'}")
-    if not check_for_news.is_running():
-        check_for_news.start()
+    logger.info(f"Daily digest scheduled for {DIGEST_HOUR:02d}:{DIGEST_MINUTE:02d} {DIGEST_TIMEZONE}")
+    if not post_daily_digest.is_running():
+        post_daily_digest.start()
 
 
 @bot.command(name="news")
@@ -608,31 +599,34 @@ async def sites_command(ctx: commands.Context):
     await ctx.send("Configured sites:\n" + "\n".join(lines))
 
 
-@bot.command(name="digest")
-async def digest_command(ctx: commands.Context):
-    """Usage: !digest -- scrapes every configured source and posts a
-    browsable HTML digest (month-grouped, filterable by source) as a file."""
+async def build_digest_file() -> discord.File:
     # Imported lazily: generate_digest imports scrape_all_sites/Article back
     # from this module, so importing it at module load time would deadlock
     # on the circular import. By call time news_bot is fully initialized.
     import generate_digest
 
+    html_page = await asyncio.to_thread(generate_digest.generate)
+    buffer = io.BytesIO(html_page.encode("utf-8"))
+    filename = f"digest-{datetime.now(DIGEST_TIMEZONE):%Y-%m-%d}.html"
+    return discord.File(buffer, filename=filename)
+
+
+@bot.command(name="digest")
+async def digest_command(ctx: commands.Context):
+    """Usage: !digest -- scrapes every configured source and posts a
+    browsable HTML digest (month-grouped, filterable by source) as a file."""
     async with ctx.typing():
-        html_page = await asyncio.to_thread(generate_digest.generate)
-        buffer = io.BytesIO(html_page.encode("utf-8"))
-        filename = f"digest-{datetime.now(timezone.utc):%Y-%m-%d}.html"
+        file = await build_digest_file()
         await ctx.send(
             content="Here's the latest digest — download and open it in a browser.",
-            file=discord.File(buffer, filename=filename),
+            file=file,
         )
 
 
-@tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
-async def check_for_news():
-    """Background task: periodically scrape all sources and post any new
-    (not-seen-before) articles to NEWS_CHANNEL_ID."""
-    global seen_links
-
+@tasks.loop(time=dtime(hour=DIGEST_HOUR, minute=DIGEST_MINUTE, tzinfo=DIGEST_TIMEZONE))
+async def post_daily_digest():
+    """Every morning: scrape all sources, build the HTML digest, and post it
+    to NEWS_CHANNEL_ID with an @everyone ping."""
     if NEWS_CHANNEL_ID == 0:
         return  # auto-posting disabled if no channel configured
 
@@ -641,31 +635,21 @@ async def check_for_news():
         logger.warning(f"Could not find channel with id {NEWS_CHANNEL_ID}")
         return
 
-    logger.info("Checking configured sources for new articles...")
-    results = await asyncio.to_thread(scrape_all_sites)
-
-    new_count = 0
-    for site_name, articles in results.items():
-        # Post oldest-first among the newly found ones, so channel reads top-to-bottom chronologically
-        for article in reversed(articles):
-            if article.link in seen_links:
-                continue
-            seen_links.add(article.link)
-            new_count += 1
-            try:
-                await channel.send(embed=make_embed(article))
-            except discord.DiscordException as e:
-                logger.error(f"Failed to send article to Discord: {e}")
-
-    if new_count:
-        save_seen_links(seen_links)
-        logger.info(f"Posted {new_count} new article(s).")
-    else:
-        logger.info("No new articles found.")
+    logger.info("Generating morning digest...")
+    try:
+        file = await build_digest_file()
+        await channel.send(
+            content="@everyone Good morning! Here's today's particle physics digest.",
+            file=file,
+            allowed_mentions=discord.AllowedMentions(everyone=True),
+        )
+        logger.info("Posted morning digest.")
+    except discord.DiscordException as e:
+        logger.error(f"Failed to send digest to Discord: {e}")
 
 
-@check_for_news.before_loop
-async def before_check_for_news():
+@post_daily_digest.before_loop
+async def before_post_daily_digest():
     await bot.wait_until_ready()
 
 
