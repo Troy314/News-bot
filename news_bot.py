@@ -151,6 +151,10 @@ SOURCES = {
         "kind": "rss",
         "url": "https://phys.org/rss-feed/physics-news/particle-physics/",
     },
+    "Fermilab": {
+        "kind": "rss",
+        "url": "https://news.fnal.gov/feed/",
+    },
     # Blocks the bot's own User-Agent string with a 403 but allows a
     # browser-like one -- override just for this source.
     "Interactions": {
@@ -623,10 +627,10 @@ async def digest_command(ctx: commands.Context):
         )
 
 
-@tasks.loop(time=dtime(hour=DIGEST_HOUR, minute=DIGEST_MINUTE, tzinfo=DIGEST_TIMEZONE))
-async def post_daily_digest():
-    """Every morning: scrape all sources, build the HTML digest, and post it
-    to NEWS_CHANNEL_ID with an @everyone ping."""
+async def run_daily_digest():
+    """Scrape all sources, build the HTML digest, and post it to
+    NEWS_CHANNEL_ID with an @everyone ping. Shared by the 9am schedule and
+    the !forcedigest command, so a forced run behaves identically."""
     if NEWS_CHANNEL_ID == 0:
         return  # auto-posting disabled if no channel configured
 
@@ -648,9 +652,26 @@ async def post_daily_digest():
         logger.error(f"Failed to send digest to Discord: {e}")
 
 
+@tasks.loop(time=dtime(hour=DIGEST_HOUR, minute=DIGEST_MINUTE, tzinfo=DIGEST_TIMEZONE))
+async def post_daily_digest():
+    await run_daily_digest()
+
+
 @post_daily_digest.before_loop
 async def before_post_daily_digest():
     await bot.wait_until_ready()
+
+
+@bot.command(name="forcedigest")
+async def force_digest_command(ctx: commands.Context):
+    """Usage: !forcedigest -- immediately runs the scheduled daily digest
+    post (scrape + @everyone ping to NEWS_CHANNEL_ID), without waiting for
+    the 9am schedule. Useful for testing the automatic pipeline on demand."""
+    if NEWS_CHANNEL_ID == 0:
+        await ctx.send("NEWS_CHANNEL_ID isn't set, so there's nowhere configured to post the daily digest.")
+        return
+    await ctx.send("Forcing the daily digest run now...")
+    await run_daily_digest()
 
 
 # --------------------------------------------------------------------------
