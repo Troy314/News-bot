@@ -63,9 +63,11 @@ Example for a fictional site where each article looks like:
 import os
 import io
 import re
+import sys
 import asyncio
 import logging
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from datetime import datetime, timezone, time as dtime
 from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
@@ -77,7 +79,11 @@ import discord
 from discord.ext import commands, tasks
 
 from dotenv import load_dotenv
-load_dotenv()
+
+# Load .env from next to this file, not the process's working directory --
+# matters once this is launched from autostart/systemd, where the cwd isn't
+# guaranteed to be the project directory the way it is when run from a shell.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # --------------------------------------------------------------------------
 # CONFIGURATION
@@ -678,9 +684,34 @@ async def force_digest_command(ctx: commands.Context):
 # ENTRYPOINT
 # --------------------------------------------------------------------------
 
+async def run_digest_mode_and_exit():
+    """Connect just long enough to post one digest, then disconnect --
+    for `python news_bot.py --digest`, e.g. run once from a PC's autostart
+    instead of running the bot as a standing service."""
+    if NEWS_CHANNEL_ID == 0:
+        logger.error("NEWS_CHANNEL_ID isn't set -- nothing to post the digest to. Exiting.")
+        return
+
+    async def runner():
+        async with bot:
+            await bot.start(DISCORD_TOKEN)
+
+    task = asyncio.create_task(runner())
+    await bot.wait_until_ready()
+    try:
+        await run_daily_digest()
+    finally:
+        await bot.close()
+    await task
+
+
 if __name__ == "__main__":
     if DISCORD_TOKEN == "PUT_YOUR_TOKEN_HERE":
         raise SystemExit(
             "Set the DISCORD_TOKEN environment variable (or edit the script) before running."
         )
-    bot.run(DISCORD_TOKEN)
+
+    if "--digest" in sys.argv or "--once" in sys.argv:
+        asyncio.run(run_digest_mode_and_exit())
+    else:
+        bot.run(DISCORD_TOKEN)
