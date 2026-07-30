@@ -692,17 +692,19 @@ async def run_digest_mode_and_exit():
         logger.error("NEWS_CHANNEL_ID isn't set -- nothing to post the digest to. Exiting.")
         return
 
-    async def runner():
-        async with bot:
-            await bot.start(DISCORD_TOKEN)
-
-    task = asyncio.create_task(runner())
-    await bot.wait_until_ready()
-    try:
-        await run_daily_digest()
-    finally:
-        await bot.close()
-    await task
+    # `async with bot:` runs Client's setup hook synchronously (this is what
+    # actually creates the internal "ready" event) before we ever await
+    # anything -- entering it here, before starting the connect task, is
+    # what makes wait_until_ready() below valid to call at all instead of
+    # racing a task that hasn't had a chance to run its first line yet.
+    async with bot:
+        task = asyncio.create_task(bot.start(DISCORD_TOKEN))
+        await bot.wait_until_ready()
+        try:
+            await run_daily_digest()
+        finally:
+            await bot.close()
+        await task
 
 
 if __name__ == "__main__":
