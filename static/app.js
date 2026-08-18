@@ -408,12 +408,12 @@ function renderLatestArticle(s) {
 }
 
 function renderSourceRow(s) {
-  const groupBadge = s.group_tag ? `<span class="content-tag">${escapeHtml(s.group_tag)}</span>` : "";
   return `
     <div class="source-row ${s.enabled ? "" : "disabled"}" data-status="${s.last_status || "unchecked"}" data-group="${escapeHtml(s.group_tag || "")}">
       <span class="name">${escapeHtml(s.name)}</span>
       <span class="meta">${s.kind}${s.user_agent ? " · custom UA" : ""}</span>
-      ${groupBadge}
+      <input type="text" class="group-input" data-id="${s.id}" list="existing-groups-inline"
+             value="${escapeHtml(s.group_tag || "")}" placeholder="Group...">
       ${renderHealthBadge(s)}
       <button class="edit-btn" data-id="${s.id}">Edit</button>
       <button class="toggle-btn" data-id="${s.id}" data-enabled="${s.enabled}">${s.enabled ? "Disable" : "Enable"}</button>
@@ -435,7 +435,7 @@ async function loadSources() {
   document.querySelectorAll(".edit-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const source = state.sources.find((s) => s.id === Number(btn.dataset.id));
-      if (source) openEditSourceForm(source);
+      if (source) openEditSourceForm(source, btn.closest(".source-row"));
     });
   });
   document.querySelectorAll(".toggle-btn").forEach((btn) => {
@@ -449,6 +449,21 @@ async function loadSources() {
     btn.addEventListener("click", async () => {
       if (!confirm("Delete this source and all its articles?")) return;
       await api(`/api/sources/${btn.dataset.id}`, { method: "DELETE" });
+      loadSources();
+    });
+  });
+
+  // Inline group editing, right on the row -- no need to open the full
+  // Edit panel just to (re)assign which group a source belongs to.
+  const existingGroups = [...new Set(state.sources.map((s) => s.group_tag).filter(Boolean))].sort();
+  document.getElementById("existing-groups-inline").innerHTML =
+    existingGroups.map((g) => `<option value="${escapeHtml(g)}">`).join("");
+  document.querySelectorAll(".group-input").forEach((input) => {
+    input.addEventListener("change", async () => {
+      await api(`/api/sources/${input.dataset.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ group_tag: input.value.trim() || "" }),
+      });
       loadSources();
     });
   });
@@ -615,19 +630,22 @@ function editSourceFormHtml(s) {
     </div>`;
 }
 
-function openEditSourceForm(source) {
-  const form = document.getElementById("add-source-form");
-  form.innerHTML = editSourceFormHtml(source);
-  form.style.display = "block";
-  form.scrollIntoView({ behavior: "smooth", block: "center" });
+function openEditSourceForm(source, rowEl) {
+  // Only one inline edit form open at a time.
+  document.querySelectorAll(".inline-edit-form").forEach((el) => el.remove());
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "inline-edit-form";
+  wrapper.innerHTML = editSourceFormHtml(source);
+  rowEl.insertAdjacentElement("afterend", wrapper);
+  wrapper.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
   document.getElementById("edit-kind").addEventListener("change", (e) => {
     document.getElementById("edit-css-fields").style.display = e.target.value === "css" ? "block" : "none";
   });
 
   document.getElementById("edit-cancel-btn").addEventListener("click", () => {
-    form.style.display = "none";
-    form.innerHTML = "";
+    wrapper.remove();
   });
 
   document.getElementById("edit-save-btn").addEventListener("click", async () => {
@@ -658,8 +676,7 @@ function openEditSourceForm(source) {
 
     try {
       await api(`/api/sources/${source.id}`, { method: "PUT", body: JSON.stringify(body) });
-      form.style.display = "none";
-      form.innerHTML = "";
+      wrapper.remove();
       loadSources();
     } catch (e) {
       errorEl.textContent = e.message;

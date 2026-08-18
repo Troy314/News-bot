@@ -240,7 +240,21 @@ all scraped identically once you have a feed URL or selectors.
 
    Every candidate is verified by actually parsing it (`_looks_like_feed`),
    not just checking the HTTP status — a 200 with an HTML error page is a
-   real failure mode this guards against. Probing 404s here are *expected*,
+   real failure mode this guards against. **A real bug this had: "parses
+   without an `ET.ParseError`" isn't the same as "is a feed."**
+   `_looks_like_feed` originally returned `True` the moment `ET.fromstring`
+   didn't raise, without checking the parsed result actually contained any
+   `<item>`/`<entry>`. Well-formed HTML (all tags properly closed — common
+   from modern frameworks, e.g. a Next.js-rendered site) parses as valid
+   XML with zero matches, so a bare homepage with no feed at all was
+   silently accepted as "a feed" — caught for real: `detect_feed()` on
+   Subatech's plain homepage returned the homepage URL *as its own feed*.
+   This also meant a genuinely-empty-but-syntactically-valid RSS document
+   (IJCLab's site-wide `/en/feed/`, which parses fine but has zero
+   `<item>`s) was accepted too, offering a technically-real but useless
+   feed instead of correctly reporting "nothing found." Fixed by checking
+   `len(list(parse_feed_items(content))) > 0`, not just that parsing
+   didn't throw. Probing 404s here are *expected*,
    not errors — logged at `debug`, not `error` (`quiet=True` on the fetch
    helpers), so a normal "no feed, fall back to manual" outcome doesn't
    spam the log like a real failure would. **Known limitation, not chased
@@ -302,11 +316,33 @@ all scraped identically once you have a feed URL or selectors.
 `kind` and `category` — both were originally missing from that model (only
 addable at creation), fixed once "modify an existing source" became a real
 need. `static/app.js`'s Sources tab has an "Edit" button per row
-(`openEditSourceForm()`) that reuses the same `#add-source-form` container
-the add-flow uses, pre-filled with the row's current values; unlike the
-add-flow it has no auto-detect step, since you're editing something that
-(presumably) already resolved to a working config once — it's a plain form
-covering every field at once, submitted as a single PUT. Same sparse-PUT
+(`openEditSourceForm()`) that inserts the form as a real DOM sibling
+**right after that specific `.source-row`** (`rowEl.insertAdjacentElement
+("afterend", wrapper)`), not into the shared `#add-source-form` container
+at the top of the tab — that was the first version, and editing a source
+near the bottom of a long list meant the form popped up scrolled away from
+the row you were looking at. Only one inline edit form can be open at a
+time (`openEditSourceForm` removes any existing `.inline-edit-form` before
+inserting a new one); `loadSources()`'s full `innerHTML` replacement of the
+row-list container also implicitly clears it on any refresh, so a stale
+form can't survive a reload. Pre-filled with the row's current values;
+unlike the add-flow it has no auto-detect step, since you're editing
+something that (presumably) already resolved to a working config once —
+it's a plain form covering every field at once, submitted as a single PUT.
+
+**Group is editable without opening this form at all** — each source row
+has its own `<input class="group-input">` (a plain text field with a
+shared `<datalist id="existing-groups-inline">` for autocomplete,
+rebuilt from `state.sources` on every `loadSources()`), PUTing just
+`{group_tag: ...}` on `change`. This is the one field with a faster path
+than the full Edit form, added specifically because re-grouping sources is
+a much more frequent action than reconfiguring their scrape settings — and
+unlike the Edit form's fields, this input's `change` handler sends an
+explicit empty string (not `null`) when cleared, so — unlike every other
+field in this app's sparse-PUT convention — **this is the one place a
+group actually can be cleared back to unset**, not just replaced.
+
+Same sparse-PUT
 contract as the rest of this API: an omitted field is left alone, not
 cleared, so you can't currently blank out an optional field (`user_agent`,
 `date_selector`, etc.) back to empty through this form — only replace it

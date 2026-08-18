@@ -575,8 +575,12 @@ def _looks_like_feed(content: bytes | None) -> bool:
     if not content:
         return False
     try:
-        list(parse_feed_items(content))
-        return True
+        # Well-formed HTML (properly closed tags, no bare &, etc -- common
+        # from modern frameworks) can parse as valid XML with zero
+        # <channel>/<item> or <atom:entry> matches. Checking only "did
+        # ET.fromstring not raise" made a bare homepage look like a feed --
+        # a real result needs actual items, not just parseable-as-XML.
+        return len(list(parse_feed_items(content))) > 0
     except ET.ParseError:
         return False
 
