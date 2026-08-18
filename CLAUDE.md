@@ -214,10 +214,15 @@ through `get_articles()` instead.
 
 ## Adding a source
 
-Two-tier detection, matching the web UI's "Add source" form (`category` is
-a separate, orthogonal choice — `website`/`newsletter`/`social`, purely a
-UI grouping, all scraped identically once you have a feed URL or selectors):
-1. **Auto-detect** (`scraper.detect_feed(url)`), checked in this order:
+The web UI's "Add source" form (`static/app.js`'s `sourceFormHtml()`) has
+**three buttons side by side, not an auto-detect-then-fallback flow** —
+auto-detection is the default path, but a manual override is always
+available, not just shown after detection fails. `category` is a separate,
+orthogonal choice — `website`/`newsletter`/`social`, purely a UI grouping,
+all scraped identically once you have a feed URL or selectors.
+
+1. **"Auto-detect feed"** runs `scraper.detect_feed(url)`, checked in this
+   order:
    1. **The given URL might already *be* a feed** — e.g. a YouTube
       `feeds/videos.xml?channel_id=...` URL found by hand and pasted
       directly. Checked first (one fetch, its result reused for the next
@@ -245,9 +250,23 @@ UI grouping, all scraped identically once you have a feed URL or selectors):
    a technically-valid but too-broad feed with no retry. The web UI shows
    the discovered feed URL before you commit to adding it specifically so
    this is visible/reviewable, not just silently wrong.
-2. **Manual CSS selectors** (the same shape `seed_sources.py`'s 5 CSS
-   sources use): when no feed is found, the form asks for
-   article/title/link/base-url selectors plus optional date/image ones.
+2. **"This URL is already a feed"** skips detection entirely: the typed
+   URL is submitted verbatim as `kind: "rss"`, with **no server
+   round-trip and no verification that it actually parses**. For a user
+   who already knows their exact feed URL (found by hand, e.g. a YouTube
+   channel feed a consent wall prevented auto-discovering — see "Social
+   media sources" below), waiting on `detect_feed()`'s multi-step probing
+   is pure latency with no chance of a better answer; this exists
+   specifically to skip that wait. The status line says "not verified" for
+   exactly this reason — a typo here won't be caught until the first real
+   scrape reports `"error"` status in the Sources tab, not at add-time.
+3. **"Configure manually"** jumps straight to the CSS-selector fields
+   without needing an auto-detect attempt to fail first — useful when you
+   already know a feed doesn't exist for this page, or already worked out
+   the right selectors elsewhere. The same shape `seed_sources.py`'s 5 CSS
+   sources use: article/title/link/base-url selectors, plus optional
+   date/image ones.
+
    This is a real, hands-on step — inspect the page's HTML (browser dev
    tools, "Inspect Element") to find the right selectors, same as every
    CSS source in `seed_sources.py` was built. There is no heuristic
@@ -285,13 +304,76 @@ existed — since SQLite can't `ALTER` a `CHECK` constraint in place,
 `db._ensure_social_category()` does a real recreate-and-copy migration
 (rename `sources` → `sources_old`, recreate under the new constraint from
 `SCHEMA`, copy every column back via `PRAGMA table_info` so it doesn't need
-updating if more columns get added later, drop the old table) — verified
-against the real production DB (23 sources, 197 articles at the time)
-before trusting it, with `PRAGMA foreign_keys` toggled off/on around the
-swap so `articles.source_id` references survive the rename. Runs once at
-startup via `init_db()`, after `_ensure_columns()` so there's a complete
-column set to copy, and is a no-op forever after via a check against the
-table's own stored `CREATE TABLE` SQL text.
+updating if more columns get added later, drop the old table). Runs once
+at startup via `init_db()`, after `_ensure_columns()` so there's a
+complete column set to copy, and is a no-op forever after via a check
+against the table's own stored `CREATE TABLE` SQL text.
+
+**This migration corrupted production data once, silently, for hours —
+see the next section.** Don't copy its original `PRAGMA foreign_keys =
+OFF` / `ON` pattern alone for a future rename-based migration; read
+`_ensure_social_category()`'s docstring in `db.py` first.
+
+## Incident: a rename-based migration silently broke `articles`' foreign key
+
+**What happened**: `_ensure_social_category()`'s `ALTER TABLE sources
+RENAME TO sources_old` didn't just rename the table — SQLite's default
+`legacy_alter_table=OFF` behavior *also* rewrites the stored schema text of
+every other table's foreign keys that reference it. `articles.source_id
+REFERENCES sources(id)` silently became `REFERENCES "sources_old"(id)` the
+instant the rename ran, and stayed that way through the rest of the
+migration (recreating `sources` under its new name did nothing to fix
+`articles`' already-rewritten schema). `PRAGMA foreign_keys = OFF` — which
+the migration already had — only suppresses *runtime constraint
+enforcement*; it has nothing to do with whether a rename rewrites other
+tables' schema text. Those are two unrelated settings, and only one of
+them was handled.
+
+**Why it stayed invisible**: `INSERT OR IGNORE` (used everywhere articles
+are persisted) resolves a `UNIQUE` conflict *before* ever evaluating the
+`FOREIGN KEY` constraint — so as long as every scraped article that run
+happened to already exist (the normal steady state for a site with no
+genuinely new content), every insert short-circuited on the duplicate
+`link` and the broken FK was simply never reached. The bug shipped, the
+app kept running, `!forcedigest`/the daily catch-up both "succeeded" (with
+"no new articles"), for however long it took a real new article to show
+up. The first one to appear crashed `POST /api/run-now` with
+`sqlite3.OperationalError: no such table: main.sources_old`, a 500 the
+user hit directly.
+
+**Why the existing safety check didn't catch it either**: this project
+already had an orphan-row check (`source_id NOT IN (SELECT id FROM
+sources)`), used to verify the migration right after writing it. That
+check only compares *id values* — it stayed green the entire time,
+because every already-existing article's `source_id` genuinely did match
+a real row in the new `sources` table. The corruption was in the
+*schema text* of a constraint definition, not in any row's data, which a
+value-level check structurally cannot see.
+
+**The fix, in two parts**:
+1. `PRAGMA legacy_alter_table = ON` for the duration of any table rename
+   in a migration — this makes `RENAME` a pure rename, with no side effect
+   on other tables' stored schema. Added to `_ensure_social_category()`;
+   use it for any future rename-based migration too, not just this one.
+2. `db._check_foreign_key_integrity()`, run once at the end of every
+   `init_db()` call via `PRAGMA foreign_key_check` — this inspects actual
+   constraint *definitions*, not row values, so it's the check that would
+   have caught this immediately (verified by running it against a restored
+   pre-fix backup: it flagged all 197 articles at once). Logs loudly, does
+   not raise — a corrupt FK doesn't stop the app from serving whatever
+   already works, and raising here would turn a data problem into an
+   availability problem.
+
+**Recovery** (what was actually run against the live DB, in case a similar
+fix is ever needed again): back up `news.db` first, then a recreate-and-copy
+of `articles` itself — rename to `articles_broken`, recreate `articles`
+fresh from `SCHEMA` (correct FK), copy every column back via `PRAGMA
+table_info`, drop the old table — with the same `legacy_alter_table = ON`
+guard this time. Verified after: `articles`' own stored schema once again
+says `REFERENCES sources(id)`; `favorites.article_id REFERENCES
+articles(id)` (a *third* table, depending on the one just renamed) was
+checked too, and confirmed *not* corrupted, since `legacy_alter_table=ON`
+was active for that rename from the start.
 
 **Which platforms actually work, verified against real accounts, not
 assumed:**
@@ -412,27 +494,37 @@ upfront.
 
 - **Feed**: a single grid (`renderCard()`), grouped into collapsible
   per-day sections (`groupByDay()`/`renderDayGroup()`, `<details>`/
-  `<summary>`, most recent day open, older days collapsed — same
-  established pattern as `digest.py`'s month-sections) with a vertical
-  accent line (`.day-group { border-left: ... }`) separating one day's
-  cluster from the next.
+  `<summary>`, same established pattern as `digest.py`'s month-sections)
+  with a vertical accent line (`.day-group { border-left: ... }`)
+  separating one day's cluster from the next. **Days within the last
+  week (`OPEN_BY_DEFAULT_MS`, 7 days) open by default; older days
+  collapsed** — checked per-group against that group's own articles'
+  `pub_date`, not just "is this the first/most-recent group in the list"
+  (an earlier version only auto-opened the single most recent day; that
+  was widened to a rolling week on request, since a day-by-day expand
+  click for "what happened this week" was tedious).
   - **This replaced an earlier separate Grid/Timeline toggle** — a
     distinct vertical-list-with-dots view, switched via two buttons. That
     was explicitly reverted in favor of one grid with day-dividers; if
     you're tempted to reintroduce a second view mode for the Feed tab,
     check first — it's been tried and undone once already.
-  - **Two independent chip filters**, combined with AND:
+  - **Three independent chip filters**, combined with AND:
     `renderSourceChips()` (colored by an alphabetically-stable hue
     rotation — same `source_hues()` logic as `digest.py`, kept in sync
     manually since this is plain JS with no shared module system with the
-    Python renderer) and `renderTagChips()` (content topic, uncolored).
-    Both share one `wireChips()` click handler and one combined
+    Python renderer), `renderTagChips()` (content topic, uncolored), and
+    `renderGroupChips()` (the free-text source `group_tag` — see "Source
+    groups" below; only rendered if at least one source has one set, so
+    an unused feature doesn't clutter the toolbar with an empty row). All
+    three share one `wireChips()` click handler (parameterized by which
+    `Set` and which `data-*` key each chip group uses) and one combined
     `applyFeedFilter()`, which hides individual `.card`s by
-    `data-source`/`data-tag` *and* hides a whole `.day-group` if every
-    card inside it got filtered out (mirrors `digest.py`'s empty-month-
-    section hiding) — `#feed-no-match` shows only when a filter combination
-    matches nothing, kept separate from `#feed-empty` (genuinely zero
-    articles in the DB), since those need different messages.
+    `data-source`/`data-tag`/`data-group` *and* hides a whole `.day-group`
+    if every card inside it got filtered out (mirrors `digest.py`'s
+    empty-month-section hiding) — `#feed-no-match` shows only when a
+    filter combination matches nothing, kept separate from `#feed-empty`
+    (genuinely zero articles in the DB), since those need different
+    messages.
   - A Small/Medium/Large card-size toggle (`applyFeedSize()`, reusing the
     `.view-toggle` segmented-button pattern), purely a `data-size` attribute
     on `#feed-days` that CSS attribute-selectors key off
@@ -452,13 +544,40 @@ upfront.
   move it between folders without unfavoriting first.
 - **Sources**: enable/disable + delete per source, a health badge per
   source (🟢/🟡/🔴/⚪, hover for the actual `last_error` — see "Source
-  health tracking" above), a quick single-select filter chip row (All /
-  🟢 Working / 🟡 Empty / 🔴 Broken, `applyHealthFilter()` — deliberately
-  single-select unlike the Feed tab's opt-in chips, since "show me the
-  broken ones" is a mutually-exclusive question, not a combinable one),
+  health tracking" above), a group badge (see "Source groups" below), two
+  independent single-select filter-chip rows — health (All / 🟢 Working /
+  🟡 Empty / 🔴 Broken) and group — combined via one `applySourceFilters()`
+  (deliberately single-select per row, unlike the Feed tab's opt-in chips,
+  since "show me the broken ones" / "show me just this group" are each a
+  mutually-exclusive question within their own row, not a combinable one),
   and the add-source flow described above.
 - **Settings**: digest schedule (see the restart caveat above), Discord
   channel id, and newsletter subscriber management.
+
+## Source groups
+
+`sources.group_tag` is a free-text, user-defined label — deliberately
+**orthogonal to `category`** (`website`/`newsletter`/`social`), not a
+replacement or a sub-value of it. `category` is a fixed, structural
+classification tied to how a source is scraped/presented (the three
+Sources-tab sections); `group_tag` is whatever organizational scheme the
+user wants (e.g. "CNRS Labs", "Gravitational Wave", a country) and is
+entirely optional — a source with no group still works identically
+everywhere, and group-based UI (the Sources-tab group filter, the Feed
+tab's group chip row) simply doesn't render if no source has one set.
+
+Single value per source, not a multi-tag/join-table design — kept simple
+since nothing so far asked for a source belonging to more than one group.
+The add-source form's Group field has a `<datalist>` populated from every
+distinct `group_tag` already in use (`state.sources`, recomputed each time
+the form opens), so picking an existing group autocompletes rather than
+needing to retype it — but it's still a plain text input underneath, so a
+typo creates a new group rather than erroring.
+
+Exposed on articles too (`sources.group_tag AS source_group` in `web.py`'s
+`list_articles` query) specifically so the Feed tab can filter by it
+without a second round-trip — group membership is a property of the
+*source*, but filtering naturally happens where the *articles* are.
 
 ## Discord bot (`discord_bot.py`)
 

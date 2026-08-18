@@ -41,6 +41,7 @@ class SourceIn(BaseModel):
     image_selector: str | None = None
     user_agent: str | None = None
     enabled: bool = True
+    group_tag: str | None = None  # free-text, user-defined -- orthogonal to category
 
 
 class SourceUpdate(BaseModel):
@@ -54,6 +55,7 @@ class SourceUpdate(BaseModel):
     image_selector: str | None = None
     user_agent: str | None = None
     enabled: bool | None = None
+    group_tag: str | None = None
 
 
 class DetectFeedIn(BaseModel):
@@ -122,12 +124,13 @@ def create_source(body: SourceIn):
         try:
             cur = conn.execute(
                 "INSERT INTO sources (name, kind, category, url, article_selector, title_selector, "
-                "link_selector, base_url, date_selector, image_selector, user_agent, enabled) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "link_selector, base_url, date_selector, image_selector, user_agent, enabled, group_tag) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     body.name, body.kind, body.category, body.url,
                     body.article_selector, body.title_selector, body.link_selector, body.base_url,
                     body.date_selector, body.image_selector, body.user_agent, int(body.enabled),
+                    body.group_tag,
                 ),
             )
             conn.commit()
@@ -183,7 +186,7 @@ def list_articles(source: str | None = None, favorites_only: bool = False, folde
     try:
         query = (
             "SELECT articles.*, sources.name AS source_name, sources.category AS source_category, "
-            "favorites.folder_id AS folder_id FROM articles "
+            "sources.group_tag AS source_group, favorites.folder_id AS folder_id FROM articles "
             "JOIN sources ON sources.id = articles.source_id "
             "LEFT JOIN favorites ON favorites.article_id = articles.id"
         )

@@ -85,7 +85,7 @@ function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
     ? `<span class="content-tag">${escapeHtml(article.content_tag)}</span>`
     : "";
   return `
-    <div class="card" data-source="${escapeHtml(article.source_name)}" data-tag="${escapeHtml(article.content_tag || "")}">
+    <div class="card" data-source="${escapeHtml(article.source_name)}" data-tag="${escapeHtml(article.content_tag || "")}" data-group="${escapeHtml(article.source_group || "")}">
       ${favBtn}
       ${image}
       <div class="card-body">
@@ -99,11 +99,12 @@ function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
     </div>`;
 }
 
-// Two independent filters (source, content topic) combined with AND --
-// each chip group is wired the same way via wireChips(), and either one
-// changing re-applies the combined filter over both.
+// Three independent filters (source, content topic, source group) combined
+// with AND -- each chip group is wired the same way via wireChips(), and
+// any one changing re-applies the combined filter over all three.
 const activeSources = new Set();
 const activeTags = new Set();
+const activeGroups = new Set();
 
 function wireChips(container, activeSet, dataKey) {
   container.querySelectorAll(".chip").forEach((chip) => {
@@ -142,6 +143,19 @@ function renderTagChips(container, articles) {
   wireChips(container, activeTags, "tag");
 }
 
+function renderGroupChips(container, articles) {
+  const counts = {};
+  articles.forEach((a) => { if (a.source_group) counts[a.source_group] = (counts[a.source_group] || 0) + 1; });
+  const names = Object.keys(counts).sort();
+  if (names.length === 0) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = `<button class="chip chip-all active" data-group-filter="__all__">All groups</button>` +
+    names.map((name) => `<button class="chip" data-group-filter="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`).join("");
+  wireChips(container, activeGroups, "groupFilter");
+}
+
 function dayLabel(pubDate) {
   if (!pubDate) return "Unknown date";
   const d = new Date(pubDate);
@@ -163,10 +177,12 @@ function groupByDay(articles) {
   return groups;
 }
 
-function renderDayGroup(articles, hues, isFirst) {
+const OPEN_BY_DEFAULT_MS = 7 * 24 * 60 * 60 * 1000; // keep the last week's days expanded
+
+function renderDayGroup(articles, hues, isOpen) {
   const cards = articles.map((a) => renderCard(a, hues)).join("");
   return `
-    <details class="day-group"${isFirst ? " open" : ""}>
+    <details class="day-group"${isOpen ? " open" : ""}>
       <summary>
         <span class="chevron">&#9656;</span>
         <span class="day-group-label">${escapeHtml(dayLabel(articles[0].pub_date))}</span>
@@ -178,17 +194,18 @@ function renderDayGroup(articles, hues, isFirst) {
 
 function applyFeedFilter() {
   let anyVisible = false;
-  document.querySelectorAll(".day-group").forEach((group) => {
-    let groupVisible = false;
-    group.querySelectorAll(".card").forEach((card) => {
+  document.querySelectorAll(".day-group").forEach((dayGroup) => {
+    let dayGroupVisible = false;
+    dayGroup.querySelectorAll(".card").forEach((card) => {
       const sourceOk = activeSources.size === 0 || activeSources.has(card.dataset.source);
       const tagOk = activeTags.size === 0 || activeTags.has(card.dataset.tag);
-      const show = sourceOk && tagOk;
+      const groupOk = activeGroups.size === 0 || activeGroups.has(card.dataset.group);
+      const show = sourceOk && tagOk && groupOk;
       card.classList.toggle("hidden", !show);
-      if (show) groupVisible = true;
+      if (show) dayGroupVisible = true;
     });
-    group.style.display = groupVisible ? "" : "none";
-    if (groupVisible) anyVisible = true;
+    dayGroup.style.display = dayGroupVisible ? "" : "none";
+    if (dayGroupVisible) anyVisible = true;
   });
   document.getElementById("feed-no-match").style.display = anyVisible ? "none" : "block";
 }
@@ -207,9 +224,11 @@ async function loadFeed() {
   const noMatch = document.getElementById("feed-no-match");
   const chipsEl = document.getElementById("feed-chips");
   const tagChipsEl = document.getElementById("feed-tag-chips");
+  const groupChipsEl = document.getElementById("feed-group-chips");
 
   activeSources.clear();
   activeTags.clear();
+  activeGroups.clear();
   noMatch.style.display = "none";
 
   if (articlesRaw.length === 0) {
@@ -217,19 +236,22 @@ async function loadFeed() {
     empty.style.display = "block";
     chipsEl.innerHTML = "";
     tagChipsEl.innerHTML = "";
+    groupChipsEl.innerHTML = "";
     return;
   }
   empty.style.display = "none";
 
   const hues = renderSourceChips(chipsEl, articlesRaw);
   renderTagChips(tagChipsEl, articlesRaw);
+  renderGroupChips(groupChipsEl, articlesRaw);
 
   const groups = groupByDay(articlesRaw);
+  const weekAgo = Date.now() - OPEN_BY_DEFAULT_MS;
   let html = "";
-  let first = true;
   for (const [, group] of groups) {
-    html += renderDayGroup(group, hues, first);
-    first = false;
+    const pubDate = group[0].pub_date;
+    const isRecent = pubDate ? new Date(pubDate).getTime() >= weekAgo : false;
+    html += renderDayGroup(group, hues, isRecent);
   }
   daysEl.innerHTML = html;
 
@@ -364,10 +386,12 @@ function renderHealthBadge(s) {
 }
 
 function renderSourceRow(s) {
+  const groupBadge = s.group_tag ? `<span class="content-tag">${escapeHtml(s.group_tag)}</span>` : "";
   return `
-    <div class="source-row ${s.enabled ? "" : "disabled"}" data-status="${s.last_status || "unchecked"}">
+    <div class="source-row ${s.enabled ? "" : "disabled"}" data-status="${s.last_status || "unchecked"}" data-group="${escapeHtml(s.group_tag || "")}">
       <span class="name">${escapeHtml(s.name)}</span>
       <span class="meta">${s.kind}${s.user_agent ? " · custom UA" : ""}</span>
+      ${groupBadge}
       ${renderHealthBadge(s)}
       <button class="toggle-btn" data-id="${s.id}" data-enabled="${s.enabled}">${s.enabled ? "Disable" : "Enable"}</button>
       <button class="danger delete-btn" data-id="${s.id}">Delete</button>
@@ -399,14 +423,38 @@ async function loadSources() {
     });
   });
 
-  applyHealthFilter();
+  renderGroupFilterChips();
+  applySourceFilters();
 }
 
-function applyHealthFilter() {
-  const active = document.querySelector("#health-filter-chips .chip.active");
-  const status = active ? active.dataset.health : "__all__";
+function renderGroupFilterChips() {
+  const groups = [...new Set(state.sources.map((s) => s.group_tag).filter(Boolean))].sort();
+  const container = document.getElementById("group-filter-chips");
+  if (groups.length === 0) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = `<button class="chip chip-all active" data-group="__all__">All groups</button>` +
+    groups.map((g) => `<button class="chip" data-group="${escapeHtml(g)}">${escapeHtml(g)}</button>`).join("");
+  container.querySelectorAll(".chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      container.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      applySourceFilters();
+    });
+  });
+}
+
+function applySourceFilters() {
+  const activeHealth = document.querySelector("#health-filter-chips .chip.active");
+  const status = activeHealth ? activeHealth.dataset.health : "__all__";
+  const activeGroup = document.querySelector("#group-filter-chips .chip.active");
+  const group = activeGroup ? activeGroup.dataset.group : "__all__";
+
   document.querySelectorAll(".source-row").forEach((row) => {
-    row.style.display = status === "__all__" || row.dataset.status === status ? "" : "none";
+    const statusOk = status === "__all__" || row.dataset.status === status;
+    const groupOk = group === "__all__" || row.dataset.group === group;
+    row.style.display = statusOk && groupOk ? "" : "none";
   });
 }
 
@@ -414,7 +462,7 @@ document.querySelectorAll("#health-filter-chips .chip").forEach((chip) => {
   chip.addEventListener("click", () => {
     document.querySelectorAll("#health-filter-chips .chip").forEach((c) => c.classList.remove("active"));
     chip.classList.add("active");
-    applyHealthFilter();
+    applySourceFilters();
   });
 });
 
@@ -434,6 +482,15 @@ function sourceFormHtml() {
           <option value="social">Social Media</option>
         </select>
       </div>
+      <div class="field">
+        <label>Group (optional)</label>
+        <input type="text" id="new-source-group" list="existing-groups" placeholder="e.g. CNRS Labs, Gravitational Wave">
+        <datalist id="existing-groups">
+          ${[...new Set(state.sources.map((s) => s.group_tag).filter(Boolean))].sort()
+            .map((g) => `<option value="${escapeHtml(g)}">`).join("")}
+        </datalist>
+        <p class="hint">Your own free-form label for organizing sources — separate from Category above. Used to group/filter sources and articles.</p>
+      </div>
       <div id="social-hint" class="hint" style="display:none; margin-bottom: 10px;">
         Works well: Mastodon (paste the profile URL, e.g.
         <code>https://mastodon.social/@user</code>), YouTube (paste the
@@ -447,11 +504,15 @@ function sourceFormHtml() {
       <div class="field">
         <label>URL</label>
         <input type="text" id="new-source-url" placeholder="https://example.com/news" style="width: 320px">
+      </div>
+      <div class="field">
         <button id="detect-feed-btn">Auto-detect feed</button>
+        <button id="use-as-feed-btn">This URL is already a feed</button>
+        <button id="manual-selectors-btn">Configure manually</button>
       </div>
       <div id="detect-status" class="hint"></div>
       <div id="manual-selectors" style="display:none; margin-top: 12px;">
-        <p class="hint">No feed was found automatically. Fill in CSS selectors for the article listing page (see CLAUDE.md for how to find these in your browser's dev tools).</p>
+        <p class="hint">Fill in CSS selectors for the article listing page (see CLAUDE.md for how to find these in your browser's dev tools).</p>
         <div class="field"><label>Article container selector</label><input type="text" id="sel-article" style="width:100%"></div>
         <div class="field"><label>Title selector</label><input type="text" id="sel-title" style="width:100%"></div>
         <div class="field"><label>Link selector</label><input type="text" id="sel-link" style="width:100%"></div>
@@ -490,11 +551,30 @@ document.getElementById("add-source-btn").addEventListener("click", () => {
         document.getElementById("manual-selectors").style.display = "none";
       } else {
         status.textContent = "No feed found automatically -- fill in the selectors below.";
+        document.getElementById("detected-feed-url").value = "";
         document.getElementById("manual-selectors").style.display = "block";
       }
     } catch (e) {
       status.textContent = `Error: ${e.message}`;
     }
+  });
+
+  document.getElementById("use-as-feed-btn").addEventListener("click", () => {
+    const url = document.getElementById("new-source-url").value.trim();
+    const status = document.getElementById("detect-status");
+    if (!url) {
+      status.textContent = "Enter a URL first.";
+      return;
+    }
+    document.getElementById("detected-feed-url").value = url;
+    document.getElementById("manual-selectors").style.display = "none";
+    status.textContent = `Using as feed: ${url} (not verified — this skips auto-detection entirely).`;
+  });
+
+  document.getElementById("manual-selectors-btn").addEventListener("click", () => {
+    document.getElementById("detected-feed-url").value = "";
+    document.getElementById("manual-selectors").style.display = "block";
+    document.getElementById("detect-status").textContent = "Configuring manually — fill in the selectors below.";
   });
 
   document.getElementById("cancel-source-btn").addEventListener("click", () => {
@@ -515,8 +595,9 @@ document.getElementById("add-source-btn").addEventListener("click", () => {
       return;
     }
 
+    const groupTag = document.getElementById("new-source-group").value.trim() || null;
     const body = feedUrl
-      ? { name, category, kind: "rss", url: feedUrl }
+      ? { name, category, kind: "rss", url: feedUrl, group_tag: groupTag }
       : {
           name, category, kind: "css", url,
           article_selector: document.getElementById("sel-article").value.trim(),
@@ -525,6 +606,7 @@ document.getElementById("add-source-btn").addEventListener("click", () => {
           base_url: document.getElementById("sel-base").value.trim() || url,
           date_selector: document.getElementById("sel-date").value.trim() || null,
           image_selector: document.getElementById("sel-image").value.trim() || null,
+          group_tag: groupTag,
         };
 
     try {
