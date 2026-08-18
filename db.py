@@ -8,8 +8,11 @@ and app settings (digest time, timezone, Discord channel).
 """
 
 import os
+import logging
 import sqlite3
 from pathlib import Path
+
+logger = logging.getLogger("news_bot.db")
 
 DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).resolve().parent / "news.db"))
 
@@ -31,7 +34,8 @@ CREATE TABLE IF NOT EXISTS sources (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_checked_at TEXT,
     last_status TEXT,
-    last_error TEXT
+    last_error TEXT,
+    group_tag TEXT
 );
 
 CREATE TABLE IF NOT EXISTS articles (
@@ -97,6 +101,7 @@ COLUMN_MIGRATIONS = [
     ("sources", "last_status", "TEXT"),
     ("sources", "last_error", "TEXT"),
     ("articles", "content_tag", "TEXT"),
+    ("sources", "group_tag", "TEXT"),
 ]
 
 
@@ -114,11 +119,34 @@ def _ensure_social_category(conn: sqlite3.Connection) -> None:
     recreate-and-copy migration, not just an ALTER TABLE ADD COLUMN. Run
     after _ensure_columns() so every column that might exist is already
     there to copy. Detected by checking the table's own stored CREATE TABLE
-    SQL for the new value; a no-op once applied."""
+    SQL for the new value; a no-op once applied.
+
+    THE BUG THIS ONCE HAD, for the next table-rename migration: SQLite's
+    default `legacy_alter_table=OFF` makes `ALTER TABLE ... RENAME` also
+    rewrite the *stored schema text* of every other table's foreign keys
+    that reference it -- `articles.source_id REFERENCES sources(id)`
+    silently became `REFERENCES "sources_old"(id)` the moment `sources` was
+    renamed here, surviving the rename back to `sources` because nothing
+    ever touched `articles`'s own schema again. `PRAGMA foreign_keys = OFF`
+    (which this function already had) only suppresses *runtime enforcement*
+    during the swap -- a completely different setting from
+    `legacy_alter_table`, which controls whether the rename rewrites other
+    tables' schema at all. The break was invisible until the first genuinely
+    new row in a dependent table (every prior insert happened to be a
+    duplicate, short-circuited by `INSERT OR IGNORE` before the broken FK
+    was ever evaluated) -- caught only when a real new article finally hit
+    `sqlite3.OperationalError: no such table: main.sources_old` in
+    production. Fixed with `PRAGMA legacy_alter_table = ON` for the
+    duration of the rename; verified by checking `articles`' own stored
+    schema still says `REFERENCES sources(id)`, not just re-running the
+    logical orphan-row check (`source_id NOT IN (SELECT id FROM sources)`),
+    which stayed green the entire time this was broken since it checks
+    actual values, not the broken schema text."""
     row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
     if row is None or "'social'" in row["sql"]:
         return
 
+    conn.execute("PRAGMA legacy_alter_table = ON")
     conn.execute("PRAGMA foreign_keys = OFF")
     conn.execute("ALTER TABLE sources RENAME TO sources_old")
     conn.executescript(SCHEMA)  # recreates `sources` under the current (new) constraint
@@ -127,6 +155,30 @@ def _ensure_social_category(conn: sqlite3.Connection) -> None:
     conn.execute(f"INSERT INTO sources ({column_list}) SELECT {column_list} FROM sources_old")
     conn.execute("DROP TABLE sources_old")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA legacy_alter_table = OFF")
+
+
+def _check_foreign_key_integrity(conn: sqlite3.Connection) -> None:
+    """Startup safety net, cheap to run every time: `PRAGMA foreign_key_check`
+    catches a foreign key referencing a table that no longer exists (not
+    just a dangling id value) -- exactly the failure mode a table-rename
+    migration (see _ensure_social_category's docstring for the real
+    incident) can silently introduce. The logical check this project used
+    before adding this ("source_id NOT IN (SELECT id FROM sources)") stays
+    green even when the *schema text* of a foreign key is broken, since it
+    only compares values -- this pragma inspects the actual constraint
+    definitions, which is what actually caught the incident on replay.
+    Logs loudly (doesn't raise -- a corrupt FK doesn't stop the app from
+    serving already-working data) so it surfaces immediately at next
+    startup instead of waiting for a production INSERT to hit it."""
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        logger.error(
+            f"Foreign key integrity check found {len(violations)} violation(s) -- "
+            "likely a broken FK from a table-rename migration (see db.py's "
+            "_ensure_social_category docstring for the pattern this bit once already). "
+            f"First few: {violations[:5]}"
+        )
 
 
 def init_db() -> None:
@@ -142,6 +194,7 @@ def init_db() -> None:
                 env_value = os.environ.get(key.upper(), value)
                 conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, env_value))
         conn.commit()
+        _check_foreign_key_integrity(conn)
     finally:
         conn.close()
 
