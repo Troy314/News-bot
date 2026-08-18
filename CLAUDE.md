@@ -149,28 +149,68 @@ stops updating from that path.
 
 ## Content tagging
 
-`scraper.classify_article(title)` — ordered, first-match-wins keyword
-regexes (`CONTENT_TAG_RULES`) sorted into `Obituary`/`Award`/`Personnel`/
-`Discovery`/`Event`/`Jobs`/`Funding`/`Outreach`, defaulting to `News`.
-Deliberately **title-only, English-only, no ML/API call** — title is the
-only text reliably available across every source (CSS-scraped sources have
-no body text at all, and RSS descriptions vary too much in quality/length
-to rely on), and several primary sources (CERN's `/fr/feed/`, IN2P3, CNRS
-News) publish in French, which these regexes don't attempt to cover — see
-"Suggested next steps" if that's worth fixing later.
+`scraper.classify_article(title)` tags articles by **physics topic** —
+what the article is actually about (Neutrino, Muon, Higgs, Gravitational
+Waves, Dark Matter, ...) — not by article type. An earlier version tagged
+by type (Obituary/Award/Personnel/Discovery/Event/Jobs/Funding/Outreach);
+that was explicitly replaced, not layered on top, so don't reintroduce it
+as a second tagging dimension without being asked.
+
+Ordered, first-match-wins keyword regexes (`CONTENT_TAG_RULES`), each
+covering **both English and French** — several primary sources publish in
+French (CERN's `/fr/feed/`, IN2P3, CNRS News) and would otherwise fall
+into the `General Physics` default just for being in the "wrong"
+language. The term-equivalence table below is the source of truth this
+list was built from; extend *this table* first when adding a topic, then
+mirror it into `CONTENT_TAG_RULES` — don't add French terms to the code
+without a corresponding table row, or the two will drift apart silently.
+
+| Topic | English | French |
+|---|---|---|
+| Gravitational Waves | gravitational wave(s), LIGO, Virgo, KAGRA, GWTC | onde(s) gravitationnelle(s) |
+| Neutrino | neutrino(s) | neutrino(s) *(same word)* |
+| Muon | muon(s) | muon(s) *(same word)* |
+| Higgs | Higgs | Higgs *(same word)* |
+| Dark Matter | dark matter | matière noire |
+| Dark Energy | dark energy | énergie noire |
+| Antimatter | antimatter, antiproton | antimatière |
+| Black Holes | black hole(s) | trou(s) noir(s) |
+| Superconductivity | superconduct* | supraconduct* |
+| Quantum Computing | quantum comput*, qubit(s) | ordinateur/informatique quantique |
+| Standard Model | standard model | modèle standard |
+| Accelerator & Collider | LHC, large hadron collider, accelerator(s), collider(s), beamline(s) | accélérateur(s), collisionneur(s) |
+| Cosmic Rays | cosmic ray(s), cosmic particle(s) | rayon(s) cosmique(s) |
+| Detector Technology | detector(s), sensor(s) | détecteur(s), capteur(s) |
+| Exotic Particles | exotic particle(s), tetraquark(s), pentaquark(s), baryon(s), hadron(s) | particule(s) exotique(s) |
+| *(default)* | `General Physics` — no topic matched | *(same fallback for both languages)* |
+
+Deliberately **title-only, no ML/API call, no body-text dependency** —
+title is the only text reliably available across every source (CSS-scraped
+sources have no body/description at all). This means genuinely
+topic-generic articles (funding news, personnel changes, obituaries,
+event announcements) correctly land in `General Physics` rather than being
+forced into a topic they're not really about — roughly 55-60% of real
+articles do, by design, not as a classifier weakness to chase down.
 
 `Article.__init__` computes this automatically (`content_tag or
 classify_article(title)`) whenever `content_tag` isn't passed in, so any
-freshly-scraped article always has one. Rows that predate this feature
-have `content_tag IS NULL` in the DB; `scraper.backfill_content_tags()`
-(called once at startup by `main.py`) fills those in permanently. **Read
-paths that bypass `Article`/`get_articles()` won't get the constructor's
-fallback** — `web.py`'s `/api/articles` learned this the hard way (it runs
-its own SQL for the favorites/folder `LEFT JOIN`, so every article showed
-`content_tag: null` until a matching defensive fallback was added there
-too). If you add another raw-SQL read path over `articles`, add the same
-`classify_article()` fallback, or route it through `get_articles()`
-instead.
+freshly-scraped article always has one. Two backfill paths, for two
+different situations — **use the right one**:
+- `scraper.backfill_content_tags()` — fills only `content_tag IS NULL`
+  rows (predates the feature entirely). Safe to leave running on every
+  startup (`main.py` does), since it's a no-op once nothing is NULL.
+- `scraper.retag_all_articles()` — recomputes **every** row, used once
+  when `CONTENT_TAG_RULES` itself changed (the type→topic redesign was the
+  first time this ran). Not wired into startup — run it by hand after a
+  rules change: `python -c "import scraper; scraper.retag_all_articles()"`.
+
+**Read paths that bypass `Article`/`get_articles()` won't get the
+constructor's fallback** — `web.py`'s `/api/articles` learned this the
+hard way (it runs its own SQL for the favorites/folder `LEFT JOIN`, so
+every article showed `content_tag: null` until a matching defensive
+fallback was added there too). If you add another raw-SQL read path over
+`articles`, add the same `classify_article()` fallback, or route it
+through `get_articles()` instead.
 
 ## Adding a source
 
@@ -281,29 +321,43 @@ show/hide (`static/app.js`'s `.tab-btn`/`.view` toggle), each tab lazily
 loads its own data on first activation rather than everything loading
 upfront.
 
-- **Feed**: every article, source-filter chips (colored by an
-  alphabetically-stable hue rotation — same `source_hues()` logic as
-  `digest.py`, kept in sync manually since this is plain JS with no shared
-  module system with the Python renderer), a ☆/★ favorite toggle per
-  card, a Grid/Timeline view toggle (see below), and "Check for news now"
-  (`POST /api/run-now` — this literally calls `scheduler.run_daily_job()`,
-  same code path as the daily schedule and `!forcedigest`, so testing from
-  the UI behaves identically to the real automatic run, individual Discord
-  embeds included).
-  - **Timeline view** (`renderTimeline()`/`renderTimelineRow()`) groups
-    articles by calendar day ("Today"/"Yesterday"/full date — `dayLabel()`)
-    as a vertical list with a connecting line and a per-source-colored dot,
-    a small thumbnail, and the same tag/content-tag/date meta row as a grid
-    card. Grid and Timeline share the *same* underlying article list, hue
-    map, and source-filter chips (`applyFeedFilter()` toggles `.card` and
-    `.timeline-row` elements by the same `data-source` attribute) — a
-    filter or favorite action doesn't need to know which view is currently
-    visible.
+- **Feed**: a single grid (`renderCard()`), grouped into collapsible
+  per-day sections (`groupByDay()`/`renderDayGroup()`, `<details>`/
+  `<summary>`, most recent day open, older days collapsed — same
+  established pattern as `digest.py`'s month-sections) with a vertical
+  accent line (`.day-group { border-left: ... }`) separating one day's
+  cluster from the next.
+  - **This replaced an earlier separate Grid/Timeline toggle** — a
+    distinct vertical-list-with-dots view, switched via two buttons. That
+    was explicitly reverted in favor of one grid with day-dividers; if
+    you're tempted to reintroduce a second view mode for the Feed tab,
+    check first — it's been tried and undone once already.
+  - **Two independent chip filters**, combined with AND:
+    `renderSourceChips()` (colored by an alphabetically-stable hue
+    rotation — same `source_hues()` logic as `digest.py`, kept in sync
+    manually since this is plain JS with no shared module system with the
+    Python renderer) and `renderTagChips()` (content topic, uncolored).
+    Both share one `wireChips()` click handler and one combined
+    `applyFeedFilter()`, which hides individual `.card`s by
+    `data-source`/`data-tag` *and* hides a whole `.day-group` if every
+    card inside it got filtered out (mirrors `digest.py`'s empty-month-
+    section hiding) — `#feed-no-match` shows only when a filter combination
+    matches nothing, kept separate from `#feed-empty` (genuinely zero
+    articles in the DB), since those need different messages.
+  - A ☆/★ favorite toggle per card, and "Check for news now"
+    (`POST /api/run-now` — this literally calls `scheduler.run_daily_job()`,
+    same code path as the daily schedule and `!forcedigest`, so testing
+    from the UI behaves identically to the real automatic run, individual
+    Discord embeds included).
 - **Favorites**: folder sidebar + grid, a per-article folder `<select>` to
   move it between folders without unfavoriting first.
 - **Sources**: enable/disable + delete per source, a health badge per
   source (🟢/🟡/🔴/⚪, hover for the actual `last_error` — see "Source
-  health tracking" above), and the add-source flow described above.
+  health tracking" above), a quick single-select filter chip row (All /
+  🟢 Working / 🟡 Empty / 🔴 Broken, `applyHealthFilter()` — deliberately
+  single-select unlike the Feed tab's opt-in chips, since "show me the
+  broken ones" is a mutually-exclusive question, not a combinable one),
+  and the add-source flow described above.
 - **Settings**: digest schedule (see the restart caveat above), Discord
   channel id, and newsletter subscriber management.
 

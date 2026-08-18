@@ -33,24 +33,40 @@ class ScrapeError(Exception):
     articles, which is a distinct ("empty") outcome, not necessarily broken."""
 
 
-# Ordered, first-match-wins keyword rules for content-based tagging. Title
-# text is all we reliably have across every source (CSS-scraped sources have
-# no body/description at all, and RSS descriptions vary wildly in quality),
-# so this classifies on title only -- deliberately simple, no ML/API call,
-# tuned against real titles seen across this project's 20 sources (obituaries
-# in "(1931-2025)" parenthetical form, "X welcomes its new management"
-# spokesperson posts, CERN Courier's old jobs-feed-style postings, etc).
+# Ordered, first-match-wins keyword rules for *topic* tagging (what the
+# article is actually about physics-wise -- neutrino, muon, gravitational
+# waves, etc -- not what kind of article it is). Title text is all we
+# reliably have across every source (CSS-scraped sources have no body text
+# at all, and RSS descriptions vary too much in quality/length), so this
+# classifies on title only. Each pattern covers both English and French,
+# since several primary sources publish in French (CERN's /fr/feed/, IN2P3,
+# CNRS News) -- see CLAUDE.md's "Content tagging" section for the full
+# English/French term-equivalence table this was built from; extend that
+# table (and this list in lockstep) rather than adding French terms only
+# here, so the two don't drift apart.
 CONTENT_TAG_RULES = [
-    ("Obituary", re.compile(r"\bobituary\b|\bin memoriam\b|\bin memory of\b|passed away|\bdies at\b|\(\d{4}[–-]\d{4}\)", re.I)),
-    ("Award", re.compile(r"\baward\b|\bprize\b|\bnobel\b|\bmedal\b|\bhonou?r\b", re.I)),
-    ("Personnel", re.compile(r"\bspokesperson\b|\bappoint|welcomes its new|new (team|management)|\belected\b|new director", re.I)),
-    ("Discovery", re.compile(r"\bdiscover|\bobserv|\bdetect|\bevidence\b|\bmeasur|\bbreakthrough\b|first[- ]ever|\breveals?\b", re.I)),
-    ("Event", re.compile(r"\bworkshop\b|\bconference\b|\bsymposium\b|\bsummit\b|\bseminar\b", re.I)),
-    ("Jobs", re.compile(r"\bpostdoc\b|\bvacanc|\bhiring\b|\bphd (studentship|position)|\bjob (opening|posting)\b", re.I)),
-    ("Funding", re.compile(r"\bfunding\b|\bbudget\b|\bgrant\b|[£$]\d|\bmillion\b|\binvest", re.I)),
-    ("Outreach", re.compile(r"\bstudent|\bschool\b|\beducation\b|\boutreach", re.I)),
+    ("Gravitational Waves", re.compile(
+        r"gravitational waves?|\bligo\b|\bvirgo\b|\bkagra\b|\bgwtc\b|ondes? gravitationnelles?", re.I)),
+    ("Neutrino", re.compile(r"\bneutrinos?\b", re.I)),
+    ("Muon", re.compile(r"\bmuons?\b", re.I)),
+    ("Higgs", re.compile(r"\bhiggs\b", re.I)),
+    ("Dark Matter", re.compile(r"dark matter|mati[eè]re noire", re.I)),
+    ("Dark Energy", re.compile(r"dark energy|[ée]nergie noire", re.I)),
+    ("Antimatter", re.compile(r"antimatter|antiproton|antimati[eè]re", re.I)),
+    ("Black Holes", re.compile(r"black holes?|trous? noirs?", re.I)),
+    ("Superconductivity", re.compile(r"superconduct\w*|supraconduct\w*", re.I)),
+    ("Quantum Computing", re.compile(
+        r"quantum comput\w*|\bqubits?\b|ordinateur quantique|informatique quantique", re.I)),
+    ("Standard Model", re.compile(r"standard model|mod[eè]le standard", re.I)),
+    ("Accelerator & Collider", re.compile(
+        r"\blhc\b|large hadron collider|\baccelerators?\b|\bcolliders?\b|\bbeamlines?\b|"
+        r"acc[ée]l[ée]rateurs?|collisionneurs?", re.I)),
+    ("Cosmic Rays", re.compile(r"cosmic rays?|cosmic particles?|rayons? cosmiques?", re.I)),
+    ("Detector Technology", re.compile(r"\bdetectors?\b|\bd[ée]tecteurs?\b|\bsensors?\b|\bcapteurs?\b", re.I)),
+    ("Exotic Particles", re.compile(
+        r"exotic particles?|tetraquarks?|pentaquarks?|\bbaryons?\b|\bhadrons?\b|particules? exotiques?", re.I)),
 ]
-DEFAULT_CONTENT_TAG = "News"
+DEFAULT_CONTENT_TAG = "General Physics"
 
 
 def classify_article(title: str) -> str:
@@ -437,6 +453,28 @@ def backfill_content_tags() -> int:
         rows = conn.execute("SELECT id, title FROM articles WHERE content_tag IS NULL").fetchall()
         if not rows:
             return 0
+        conn.executemany(
+            "UPDATE articles SET content_tag = ? WHERE id = ?",
+            [(classify_article(r["title"]), r["id"]) for r in rows],
+        )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
+def retag_all_articles() -> int:
+    """Recompute content_tag for *every* article, not just NULL ones --
+    unlike backfill_content_tags(), this is for when CONTENT_TAG_RULES
+    itself changes (e.g. the event-type -> physics-topic redesign) and
+    already-tagged rows need to move to the new scheme too. Not called
+    automatically anywhere (retagging on every startup would be pointless
+    overhead for a scheme that isn't changing regularly) -- run it by hand
+    (`python -c "import scraper; scraper.retag_all_articles()"`) after a
+    CONTENT_TAG_RULES change. Returns how many rows were updated."""
+    conn = db.get_conn()
+    try:
+        rows = conn.execute("SELECT id, title FROM articles").fetchall()
         conn.executemany(
             "UPDATE articles SET content_tag = ? WHERE id = ?",
             [(classify_article(r["title"]), r["id"]) for r in rows],

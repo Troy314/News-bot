@@ -6,7 +6,6 @@ const state = {
   sources: [],
   folders: [],
   activeFolderId: null,
-  feedViewMode: "grid",
 };
 
 function escapeHtml(s) {
@@ -100,31 +99,47 @@ function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
     </div>`;
 }
 
-function renderChips(container, articles, onFilterChange) {
+// Two independent filters (source, content topic) combined with AND --
+// each chip group is wired the same way via wireChips(), and either one
+// changing re-applies the combined filter over both.
+const activeSources = new Set();
+const activeTags = new Set();
+
+function wireChips(container, activeSet, dataKey) {
+  container.querySelectorAll(".chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const val = chip.dataset[dataKey];
+      if (val === "__all__") {
+        activeSet.clear();
+        container.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+      } else {
+        chip.classList.toggle("active");
+        activeSet.has(val) ? activeSet.delete(val) : activeSet.add(val);
+      }
+      container.querySelector(".chip-all").classList.toggle("active", activeSet.size === 0);
+      applyFeedFilter();
+    });
+  });
+}
+
+function renderSourceChips(container, articles) {
   const counts = {};
   articles.forEach((a) => { counts[a.source_name] = (counts[a.source_name] || 0) + 1; });
   const hues = sourceHues(Object.keys(counts));
   const names = Object.keys(counts).sort();
-
-  container.innerHTML = `<button class="chip chip-all active" data-source="__all__">All</button>` +
-    names.map((name) => `<button class="chip" data-hue="1" style="--hue:${hues[name]}" data-source="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`).join("");
-
-  const active = new Set();
-  container.querySelectorAll(".chip").forEach((chip) => {
-    chip.addEventListener("click", () => {
-      const src = chip.dataset.source;
-      if (src === "__all__") {
-        active.clear();
-        container.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
-      } else {
-        chip.classList.toggle("active");
-        active.has(src) ? active.delete(src) : active.add(src);
-      }
-      container.querySelector(".chip-all").classList.toggle("active", active.size === 0);
-      onFilterChange(active);
-    });
-  });
+  container.innerHTML = `<button class="chip chip-all active" data-source="__all__">All sources</button>` +
+    names.map((name) => `<button class="chip" style="--hue:${hues[name]}" data-source="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`).join("");
+  wireChips(container, activeSources, "source");
   return hues;
+}
+
+function renderTagChips(container, articles) {
+  const counts = {};
+  articles.forEach((a) => { counts[a.content_tag] = (counts[a.content_tag] || 0) + 1; });
+  const names = Object.keys(counts).sort();
+  container.innerHTML = `<button class="chip chip-all active" data-tag="__all__">All topics</button>` +
+    names.map((name) => `<button class="chip" data-tag="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`).join("");
+  wireChips(container, activeTags, "tag");
 }
 
 function dayLabel(pubDate) {
@@ -138,61 +153,44 @@ function dayLabel(pubDate) {
   return d.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 }
 
-function renderTimelineRow(article, hues) {
-  const hue = hues[article.source_name] ?? 0;
-  const thumb = article.image_url
-    ? `<div class="timeline-thumb"><img src="${escapeHtml(article.image_url)}" alt="" loading="lazy" onerror="this.parentElement.remove()"></div>`
-    : "";
-  const contentTag = article.content_tag ? `<span class="content-tag">${escapeHtml(article.content_tag)}</span>` : "";
-  return `
-    <div class="timeline-row" data-source="${escapeHtml(article.source_name)}">
-      <span class="timeline-dot" style="--hue:${hue}"></span>
-      ${thumb}
-      <div class="timeline-content">
-        <h4><a href="${escapeHtml(article.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(article.title)}</a></h4>
-        <div class="timeline-meta">
-          <span class="tag" style="--hue:${hue}">${escapeHtml(article.source_name)}</span>
-          ${contentTag}
-          <span class="timeline-time" title="${escapeHtml(fullDate(article.pub_date))}">${escapeHtml(timeAgo(article.pub_date))}</span>
-        </div>
-      </div>
-      <button class="timeline-fav-btn fav-btn" data-id="${article.id}" title="Favorite">${article.is_favorite ? "★" : "☆"}</button>
-    </div>`;
-}
-
-function renderTimeline(articles, hues) {
+function groupByDay(articles) {
   const groups = new Map();
   articles.forEach((a) => {
     const key = a.pub_date ? new Date(a.pub_date).toDateString() : "unknown";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(a);
   });
-
-  let html = "";
-  for (const [, group] of groups) {
-    html += `<div class="timeline-day">
-      <div class="timeline-day-label">${escapeHtml(dayLabel(group[0].pub_date))}</div>
-      ${group.map((a) => renderTimelineRow(a, hues)).join("")}
-    </div>`;
-  }
-  return html;
+  return groups;
 }
 
-function applyFeedFilter(active) {
-  document.querySelectorAll("#feed-grid .card, #feed-timeline .timeline-row").forEach((el) => {
-    el.style.display = active.size === 0 || active.has(el.dataset.source) ? "" : "none";
+function renderDayGroup(articles, hues, isFirst) {
+  const cards = articles.map((a) => renderCard(a, hues)).join("");
+  return `
+    <details class="day-group"${isFirst ? " open" : ""}>
+      <summary>
+        <span class="chevron">&#9656;</span>
+        <span class="day-group-label">${escapeHtml(dayLabel(articles[0].pub_date))}</span>
+        <span class="day-group-count">${articles.length} article${articles.length === 1 ? "" : "s"}</span>
+      </summary>
+      <div class="grid">${cards}</div>
+    </details>`;
+}
+
+function applyFeedFilter() {
+  let anyVisible = false;
+  document.querySelectorAll(".day-group").forEach((group) => {
+    let groupVisible = false;
+    group.querySelectorAll(".card").forEach((card) => {
+      const sourceOk = activeSources.size === 0 || activeSources.has(card.dataset.source);
+      const tagOk = activeTags.size === 0 || activeTags.has(card.dataset.tag);
+      const show = sourceOk && tagOk;
+      card.classList.toggle("hidden", !show);
+      if (show) groupVisible = true;
+    });
+    group.style.display = groupVisible ? "" : "none";
+    if (groupVisible) anyVisible = true;
   });
-}
-
-document.getElementById("view-grid-btn").addEventListener("click", () => setFeedView("grid"));
-document.getElementById("view-timeline-btn").addEventListener("click", () => setFeedView("timeline"));
-
-function setFeedView(mode) {
-  state.feedViewMode = mode;
-  document.getElementById("view-grid-btn").classList.toggle("active", mode === "grid");
-  document.getElementById("view-timeline-btn").classList.toggle("active", mode === "timeline");
-  document.getElementById("feed-grid").style.display = mode === "grid" ? "" : "none";
-  document.getElementById("feed-timeline").style.display = mode === "timeline" ? "" : "none";
+  document.getElementById("feed-no-match").style.display = anyVisible ? "none" : "block";
 }
 
 async function loadFeed() {
@@ -204,25 +202,38 @@ async function loadFeed() {
   articlesRaw.forEach((a) => { a.is_favorite = favSet.has(a.id); });
 
   state.articles = articlesRaw;
-  const grid = document.getElementById("feed-grid");
-  const timeline = document.getElementById("feed-timeline");
+  const daysEl = document.getElementById("feed-days");
   const empty = document.getElementById("feed-empty");
+  const noMatch = document.getElementById("feed-no-match");
   const chipsEl = document.getElementById("feed-chips");
+  const tagChipsEl = document.getElementById("feed-tag-chips");
+
+  activeSources.clear();
+  activeTags.clear();
+  noMatch.style.display = "none";
 
   if (articlesRaw.length === 0) {
-    grid.innerHTML = "";
-    timeline.innerHTML = "";
+    daysEl.innerHTML = "";
     empty.style.display = "block";
     chipsEl.innerHTML = "";
+    tagChipsEl.innerHTML = "";
     return;
   }
   empty.style.display = "none";
 
-  const hues = renderChips(chipsEl, articlesRaw, applyFeedFilter);
+  const hues = renderSourceChips(chipsEl, articlesRaw);
+  renderTagChips(tagChipsEl, articlesRaw);
 
-  grid.innerHTML = articlesRaw.map((a) => renderCard(a, hues)).join("");
-  timeline.innerHTML = renderTimeline(articlesRaw, hues);
-  document.querySelectorAll("#feed-grid .fav-btn, #feed-timeline .fav-btn").forEach((btn) => {
+  const groups = groupByDay(articlesRaw);
+  let html = "";
+  let first = true;
+  for (const [, group] of groups) {
+    html += renderDayGroup(group, hues, first);
+    first = false;
+  }
+  daysEl.innerHTML = html;
+
+  document.querySelectorAll("#feed-days .fav-btn").forEach((btn) => {
     btn.addEventListener("click", () => toggleFavorite(btn));
   });
 }
@@ -354,7 +365,7 @@ function renderHealthBadge(s) {
 
 function renderSourceRow(s) {
   return `
-    <div class="source-row ${s.enabled ? "" : "disabled"}">
+    <div class="source-row ${s.enabled ? "" : "disabled"}" data-status="${s.last_status || "unchecked"}">
       <span class="name">${escapeHtml(s.name)}</span>
       <span class="meta">${s.kind}${s.user_agent ? " · custom UA" : ""}</span>
       ${renderHealthBadge(s)}
@@ -385,7 +396,25 @@ async function loadSources() {
       loadSources();
     });
   });
+
+  applyHealthFilter();
 }
+
+function applyHealthFilter() {
+  const active = document.querySelector("#health-filter-chips .chip.active");
+  const status = active ? active.dataset.health : "__all__";
+  document.querySelectorAll(".source-row").forEach((row) => {
+    row.style.display = status === "__all__" || row.dataset.status === status ? "" : "none";
+  });
+}
+
+document.querySelectorAll("#health-filter-chips .chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    document.querySelectorAll("#health-filter-chips .chip").forEach((c) => c.classList.remove("active"));
+    chip.classList.add("active");
+    applyHealthFilter();
+  });
+});
 
 function sourceFormHtml() {
   return `
