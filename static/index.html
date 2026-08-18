@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>News Bot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>News Bot</h1>
+    <button class="tab-btn active" data-view="feed">Feed</button>
+    <button class="tab-btn" data-view="favorites">Favorites</button>
+    <button class="tab-btn" data-view="sources">Sources</button>
+    <button class="tab-btn" data-view="settings">Settings</button>
+  </header>
+
+  <main>
+    <!-- FEED -->
+    <section id="view-feed" class="view active">
+      <div class="toolbar">
+        <button id="run-now-btn">Check for news now</button>
+        <span id="run-now-status" class="hint"></span>
+        <div class="spacer"></div>
+        <a class="btn" href="/api/digest.html" target="_blank">Download full digest</a>
+      </div>
+      <div id="feed-chips" class="chips"></div>
+      <div id="feed-grid" class="grid"></div>
+      <div id="feed-empty" class="empty-state" style="display:none">No articles yet — click "Check for news now" or wait for the daily run.</div>
+    </section>
+
+    <!-- FAVORITES -->
+    <section id="view-favorites" class="view">
+      <div class="folder-layout">
+        <div class="folder-list">
+          <div class="toolbar">
+            <button id="new-folder-btn">+ New folder</button>
+          </div>
+          <div id="folder-items"></div>
+        </div>
+        <div class="folder-content">
+          <div id="favorites-grid" class="grid"></div>
+          <div id="favorites-empty" class="empty-state" style="display:none">No favorites in this folder yet — star an article from the Feed tab.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SOURCES -->
+    <section id="view-sources" class="view">
+      <div class="toolbar">
+        <button id="add-source-btn" class="primary">+ Add website / newsletter</button>
+      </div>
+      <div id="add-source-form" style="display:none; margin-bottom: 20px;"></div>
+      <h3>Websites</h3>
+      <div id="website-sources"></div>
+      <h3>Newsletters</h3>
+      <div id="newsletter-sources"></div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="view-settings" class="view">
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Daily digest schedule</h3>
+        <div class="field">
+          <label>Time (24h)</label>
+          <input type="number" id="setting-hour" min="0" max="23" style="width:70px">
+          :
+          <input type="number" id="setting-minute" min="0" max="59" style="width:70px">
+        </div>
+        <div class="field">
+          <label>Timezone (IANA name)</label>
+          <input type="text" id="setting-timezone" placeholder="Europe/Paris">
+        </div>
+        <div class="field">
+          <label>Discord channel ID</label>
+          <input type="text" id="setting-channel" placeholder="123456789012345678">
+        </div>
+        <button id="save-settings-btn" class="primary">Save</button>
+        <span id="settings-status" class="hint"></span>
+        <p class="hint">A schedule time change takes effect after restarting the app.</p>
+      </div>
+
+      <div class="card-form">
+        <h3>Email digest subscribers</h3>
+        <p class="hint" id="smtp-status"></p>
+        <div class="field">
+          <label>Add an email</label>
+          <input type="email" id="subscribe-email" placeholder="you@example.com">
+          <button id="subscribe-btn">Subscribe</button>
+        </div>
+        <div id="subscribers-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

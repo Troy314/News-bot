@@ -1,6 +1,5 @@
 .env
-digest.html
-seen_links.json
+news.db
 bin/
 include/
 lib/

@@ -1,28 +1,22 @@
 """
-Generate a static, Inoreader-style HTML digest of every article currently
-returned by the configured news_bot SOURCES -- a dark card grid you can open
-directly in a browser, no Discord required. Includes per-source colored tags
-and client-side click-to-filter chips (all filtering runs in the browser;
-this stays a single static file, no server needed).
-
-Run:  python generate_digest.py [output_file.html]
+Renders a list of scraper.Article objects into the same Inoreader-style,
+month-grouped, source-tagged, filterable HTML digest this project has used
+since the original static generate_digest.py -- now fed from the DB instead
+of a fresh scrape, and reused for three different outputs: the `!digest`
+Discord command, the daily @everyone Discord post, and the newsletter email.
 """
 
-import sys
 import html
 from collections import OrderedDict
 from datetime import datetime, timezone
 
-from news_bot import scrape_all_sites, Article
-
-OUTPUT_FILE = sys.argv[1] if len(sys.argv) > 1 else "digest.html"
+from scraper import Article
 
 
 def time_ago(pub_date: datetime | None, now: datetime) -> str:
     if pub_date is None:
         return ""
-    delta = now - pub_date
-    seconds = delta.total_seconds()
+    seconds = (now - pub_date).total_seconds()
     if seconds < 0:
         return "just now"
     if seconds < 3600:
@@ -46,9 +40,9 @@ def full_date(pub_date: datetime | None) -> str:
 
 def source_hues(names: list[str]) -> dict[str, int]:
     """Evenly-rotated hue per source, assigned by alphabetical order so a
-    given source keeps the same color across regenerations regardless of
-    how many articles it has or where it falls in SOURCES."""
-    ordered = sorted(names)
+    given source keeps the same color across renders regardless of article
+    counts or which sources are present in this particular list."""
+    ordered = sorted(set(names))
     n = len(ordered) or 1
     return {name: round(i * 360 / n) for i, name in enumerate(ordered)}
 
@@ -74,18 +68,16 @@ def render_card(article: Article, now: datetime, hues: dict[str, int]) -> str:
         link=html.escape(article.link),
         image_block=image_block,
         title=html.escape(article.title),
-        site=html.escape(article.site),
-        site_attr=html.escape(article.site),
-        hue=hues.get(article.site, 0),
+        site=html.escape(article.source_name),
+        site_attr=html.escape(article.source_name),
+        hue=hues.get(article.source_name, 0),
         full_date=full_date(article.pub_date),
         relative=html.escape(time_ago(article.pub_date, now)),
     )
 
 
 def group_by_month(articles: list[Article]) -> "OrderedDict[tuple[int, int] | None, list[Article]]":
-    """Group already-newest-first-sorted articles by (year, month). Relies on
-    the input already being sorted descending, so groups come out in
-    chronological order with any undated articles trailing at the end."""
+    """Group already-newest-first-sorted articles by (year, month)."""
     groups: "OrderedDict[tuple[int, int] | None, list[Article]]" = OrderedDict()
     for article in articles:
         key = (article.pub_date.year, article.pub_date.month) if article.pub_date else None
@@ -112,7 +104,7 @@ MONTH_SECTION_TEMPLATE = """
     </details>"""
 
 
-def render_month_section(key: tuple[int, int] | None, articles: list[Article], now: datetime, hues: dict[str, int], is_first: bool) -> str:
+def render_month_section(key, articles: list[Article], now: datetime, hues: dict[str, int], is_first: bool) -> str:
     cards = "".join(render_card(a, now, hues) for a in articles)
     return MONTH_SECTION_TEMPLATE.format(
         open_attr=" open" if is_first else "",
@@ -125,18 +117,19 @@ def render_month_section(key: tuple[int, int] | None, articles: list[Article], n
 CHIP_TEMPLATE = '<button class="chip" data-source="{site_attr}" style="--hue: {hue}">{site} <span class="chip-count">{count}</span></button>'
 
 
-def render_chips(results: dict[str, list[Article]], hues: dict[str, int]) -> str:
+def render_chips(articles: list[Article], hues: dict[str, int]) -> str:
+    counts: dict[str, int] = {}
+    for a in articles:
+        counts[a.source_name] = counts.get(a.source_name, 0) + 1
+
     chips = ['<button class="chip chip-all active" data-source="__all__">All</button>']
-    for name in sorted(results):
-        count = len(results[name])
-        if count == 0:
-            continue
+    for name in sorted(counts):
         chips.append(
             CHIP_TEMPLATE.format(
                 site_attr=html.escape(name),
                 hue=hues.get(name, 0),
                 site=html.escape(name),
-                count=count,
+                count=counts[name],
             )
         )
     return "\n      ".join(chips)
@@ -146,12 +139,10 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Particle Physics News</title>
+<title>{page_title}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  :root {{
-    color-scheme: dark;
-  }}
+  :root {{ color-scheme: dark; }}
   * {{ box-sizing: border-box; }}
   body {{
     margin: 0;
@@ -166,183 +157,53 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     background: #1c1d21;
     border-bottom: 1px solid #2a2b30;
   }}
-  .header-top {{
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    padding: 18px 28px 12px;
-  }}
-  header h1 {{
-    font-size: 18px;
-    margin: 0;
-    font-weight: 600;
-  }}
-  header .count {{
-    color: #8a8d94;
-    font-size: 13px;
-  }}
-  header .generated {{
-    margin-left: auto;
-    color: #6b6e75;
-    font-size: 12px;
-  }}
-  .chips {{
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 0 28px 16px;
-  }}
+  .header-top {{ display: flex; align-items: baseline; gap: 12px; padding: 18px 28px 12px; flex-wrap: wrap; }}
+  header h1 {{ font-size: 18px; margin: 0; font-weight: 600; }}
+  header .count {{ color: #8a8d94; font-size: 13px; }}
+  header .generated {{ margin-left: auto; color: #6b6e75; font-size: 12px; }}
+  .chips {{ display: flex; flex-wrap: wrap; gap: 8px; padding: 0 28px 16px; }}
   .chip {{
-    appearance: none;
-    border: 1px solid #2f3037;
-    background: #232429;
-    color: #b7bac1;
-    font-size: 12.5px;
-    font-weight: 500;
-    padding: 5px 12px;
-    border-radius: 999px;
-    cursor: pointer;
+    appearance: none; border: 1px solid #2f3037; background: #232429; color: #b7bac1;
+    font-size: 12.5px; font-weight: 500; padding: 5px 12px; border-radius: 999px; cursor: pointer;
     transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
   }}
-  .chip:hover {{
-    border-color: #4c4f56;
-    color: #e8e8ea;
-  }}
-  .chip[data-source]:not(.chip-all) {{
-    border-color: hsla(var(--hue), 70%, 60%, 0.35);
-  }}
+  .chip:hover {{ border-color: #4c4f56; color: #e8e8ea; }}
+  .chip[data-source]:not(.chip-all) {{ border-color: hsla(var(--hue), 70%, 60%, 0.35); }}
   .chip[data-source]:not(.chip-all).active {{
-    background: hsla(var(--hue), 70%, 55%, 0.22);
-    border-color: hsl(var(--hue), 70%, 60%);
-    color: hsl(var(--hue), 85%, 82%);
+    background: hsla(var(--hue), 70%, 55%, 0.22); border-color: hsl(var(--hue), 70%, 60%); color: hsl(var(--hue), 85%, 82%);
   }}
-  .chip-all.active {{
-    background: #33343b;
-    border-color: #5a5d66;
-    color: #f2f2f4;
-  }}
-  .chip-count {{
-    color: inherit;
-    opacity: 0.65;
-    font-weight: 400;
-  }}
-  .sections {{
-    padding-bottom: 32px;
-  }}
-  .month-section {{
-    border-bottom: 1px solid #232429;
-  }}
+  .chip-all.active {{ background: #33343b; border-color: #5a5d66; color: #f2f2f4; }}
+  .chip-count {{ color: inherit; opacity: 0.65; font-weight: 400; }}
+  .sections {{ padding-bottom: 32px; }}
+  .month-section {{ border-bottom: 1px solid #232429; }}
   .month-section summary {{
-    list-style: none;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 16px 28px;
-    user-select: none;
+    list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px;
+    padding: 16px 28px; user-select: none;
   }}
-  .month-section summary::-webkit-details-marker {{
-    display: none;
-  }}
-  .month-section .chevron {{
-    display: inline-block;
-    font-size: 11px;
-    color: #6b6e75;
-    transition: transform 0.12s ease;
-  }}
-  .month-section[open] .chevron {{
-    transform: rotate(90deg);
-  }}
-  .month-section .month-label {{
-    font-size: 14px;
-    font-weight: 600;
-    color: #e8e8ea;
-  }}
-  .month-section .month-count {{
-    font-size: 12.5px;
-    color: #6b6e75;
-  }}
-  .month-section summary:hover .month-label {{
-    color: #9aa5ff;
-  }}
-  .grid {{
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 18px;
-    padding: 4px 28px 32px;
-  }}
+  .month-section summary::-webkit-details-marker {{ display: none; }}
+  .month-section .chevron {{ display: inline-block; font-size: 11px; color: #6b6e75; transition: transform 0.12s ease; }}
+  .month-section[open] .chevron {{ transform: rotate(90deg); }}
+  .month-section .month-label {{ font-size: 14px; font-weight: 600; color: #e8e8ea; }}
+  .month-section .month-count {{ font-size: 12.5px; color: #6b6e75; }}
+  .month-section summary:hover .month-label {{ color: #9aa5ff; }}
+  .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 18px; padding: 4px 28px 32px; }}
   .card {{
-    display: flex;
-    flex-direction: column;
-    background: #1e1f24;
-    border: 1px solid #2a2b30;
-    border-radius: 10px;
-    overflow: hidden;
-    text-decoration: none;
-    color: inherit;
-    transition: transform 0.12s ease, border-color 0.12s ease;
+    display: flex; flex-direction: column; background: #1e1f24; border: 1px solid #2a2b30; border-radius: 10px;
+    overflow: hidden; text-decoration: none; color: inherit; transition: transform 0.12s ease, border-color 0.12s ease;
   }}
-  .card:hover {{
-    transform: translateY(-2px);
-    border-color: #3d4046;
-  }}
-  .card.hidden {{
-    display: none;
-  }}
-  .card-image {{
-    width: 100%;
-    aspect-ratio: 16 / 9;
-    background: #26272c;
-    overflow: hidden;
-  }}
-  .card-image img {{
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }}
-  .card-body {{
-    padding: 14px 16px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    flex: 1;
-  }}
-  .card-body h3 {{
-    margin: 0;
-    font-size: 15px;
-    line-height: 1.4;
-    font-weight: 600;
-    color: #f2f2f4;
-  }}
-  .card-meta {{
-    margin-top: auto;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    font-size: 12px;
-    color: #8a8d94;
-  }}
+  .card:hover {{ transform: translateY(-2px); border-color: #3d4046; }}
+  .card.hidden {{ display: none; }}
+  .card-image {{ width: 100%; aspect-ratio: 16 / 9; background: #26272c; overflow: hidden; }}
+  .card-image img {{ width: 100%; height: 100%; object-fit: cover; display: block; }}
+  .card-body {{ padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 10px; flex: 1; }}
+  .card-body h3 {{ margin: 0; font-size: 15px; line-height: 1.4; font-weight: 600; color: #f2f2f4; }}
+  .card-meta {{ margin-top: auto; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: #8a8d94; }}
   .card-meta .tag {{
-    background: hsla(var(--hue), 70%, 55%, 0.18);
-    color: hsl(var(--hue), 85%, 78%);
-    font-weight: 600;
-    font-size: 11px;
-    padding: 2px 9px;
-    border-radius: 999px;
-    white-space: nowrap;
+    background: hsla(var(--hue), 70%, 55%, 0.18); color: hsl(var(--hue), 85%, 78%); font-weight: 600;
+    font-size: 11px; padding: 2px 9px; border-radius: 999px; white-space: nowrap;
   }}
-  .card-meta .date {{
-    color: #8a8d94;
-  }}
-  .empty-state {{
-    display: none;
-    padding: 60px 28px;
-    text-align: center;
-    color: #6b6e75;
-    font-size: 14px;
-  }}
+  .card-meta .date {{ color: #8a8d94; }}
+  .empty-state {{ display: none; padding: 60px 28px; text-align: center; color: #6b6e75; font-size: 14px; }}
   @media (prefers-color-scheme: light) {{
     body {{ background: #f4f4f6; color: #1a1a1e; }}
     header {{ background: #ffffff; border-bottom-color: #e4e4e8; }}
@@ -361,7 +222,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <body>
   <header>
     <div class="header-top">
-      <h1>Particle Physics News</h1>
+      <h1>{page_title}</h1>
       <span class="count">{count} articles &middot; {source_count} sources</span>
       <span class="generated">Generated {generated}</span>
     </div>
@@ -403,13 +264,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
             active.clear();
             chips.forEach(function (c) {{ c.classList.remove('active'); }});
           }} else {{
-            if (active.has(src)) {{
-              active.delete(src);
-              chip.classList.remove('active');
-            }} else {{
-              active.add(src);
-              chip.classList.add('active');
-            }}
+            if (active.has(src)) {{ active.delete(src); chip.classList.remove('active'); }}
+            else {{ active.add(src); chip.classList.add('active'); }}
           }}
           applyFilter();
         }});
@@ -423,33 +279,22 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 """
 
 
-def generate() -> str:
-    results = scrape_all_sites()
+def render_digest_html(articles: list[Article], page_title: str = "Particle Physics News") -> str:
     now = datetime.now(timezone.utc)
+    articles = sorted(articles, key=lambda a: a.pub_date or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    hues = source_hues([a.source_name for a in articles])
 
-    all_articles = [a for articles in results.values() for a in articles]
-    all_articles.sort(key=lambda a: a.pub_date or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-
-    hues = source_hues(list(results.keys()))
-
-    month_groups = group_by_month(all_articles)
+    month_groups = group_by_month(articles)
     sections = "".join(
-        render_month_section(key, articles, now, hues, is_first=(i == 0))
-        for i, (key, articles) in enumerate(month_groups.items())
+        render_month_section(key, group, now, hues, is_first=(i == 0))
+        for i, (key, group) in enumerate(month_groups.items())
     )
 
-    page = PAGE_TEMPLATE.format(
-        count=len(all_articles),
-        source_count=len(results),
+    return PAGE_TEMPLATE.format(
+        page_title=html.escape(page_title),
+        count=len(articles),
+        source_count=len(set(a.source_name for a in articles)),
         generated=now.strftime("%Y-%m-%d %H:%M UTC"),
-        chips=render_chips(results, hues),
+        chips=render_chips(articles, hues),
         sections=sections,
     )
-    return page
-
-
-if __name__ == "__main__":
-    html_page = generate()
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        f.write(html_page)
-    print(f"Wrote digest to {OUTPUT_FILE}")
