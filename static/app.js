@@ -393,6 +393,7 @@ function renderSourceRow(s) {
       <span class="meta">${s.kind}${s.user_agent ? " · custom UA" : ""}</span>
       ${groupBadge}
       ${renderHealthBadge(s)}
+      <button class="edit-btn" data-id="${s.id}">Edit</button>
       <button class="toggle-btn" data-id="${s.id}" data-enabled="${s.enabled}">${s.enabled ? "Disable" : "Enable"}</button>
       <button class="danger delete-btn" data-id="${s.id}">Delete</button>
     </div>`;
@@ -408,6 +409,12 @@ async function loadSources() {
   document.getElementById("newsletter-sources").innerHTML = newsletters.map(renderSourceRow).join("") || '<p class="hint">None yet.</p>';
   document.getElementById("social-sources").innerHTML = social.map(renderSourceRow).join("") || '<p class="hint">None yet.</p>';
 
+  document.querySelectorAll(".edit-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const source = state.sources.find((s) => s.id === Number(btn.dataset.id));
+      if (source) openEditSourceForm(source);
+    });
+  });
   document.querySelectorAll(".toggle-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const enabled = btn.dataset.enabled === "true";
@@ -527,6 +534,114 @@ function sourceFormHtml() {
       </div>
       <div id="source-form-error" class="error-text"></div>
     </div>`;
+}
+
+function editSourceFormHtml(s) {
+  return `
+    <div class="card-form">
+      <h3>Edit ${escapeHtml(s.name)}</h3>
+      <div class="field">
+        <label>Name</label>
+        <input type="text" id="edit-name" value="${escapeHtml(s.name)}">
+      </div>
+      <div class="field">
+        <label>Category</label>
+        <select id="edit-category">
+          <option value="website" ${s.category === "website" ? "selected" : ""}>Website</option>
+          <option value="newsletter" ${s.category === "newsletter" ? "selected" : ""}>Newsletter</option>
+          <option value="social" ${s.category === "social" ? "selected" : ""}>Social Media</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Group (optional)</label>
+        <input type="text" id="edit-group" list="existing-groups" value="${escapeHtml(s.group_tag || "")}">
+        <datalist id="existing-groups">
+          ${[...new Set(state.sources.map((x) => x.group_tag).filter(Boolean))].sort()
+            .map((g) => `<option value="${escapeHtml(g)}">`).join("")}
+        </datalist>
+      </div>
+      <div class="field">
+        <label>Kind</label>
+        <select id="edit-kind">
+          <option value="rss" ${s.kind === "rss" ? "selected" : ""}>RSS/Atom feed</option>
+          <option value="css" ${s.kind === "css" ? "selected" : ""}>CSS selectors</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>URL</label>
+        <input type="text" id="edit-url" value="${escapeHtml(s.url)}" style="width:100%">
+      </div>
+      <div id="edit-css-fields" style="${s.kind === "css" ? "" : "display:none; "}margin-top: 12px;">
+        <p class="hint">Only used when Kind is "CSS selectors".</p>
+        <div class="field"><label>Article container selector</label><input type="text" id="edit-sel-article" value="${escapeHtml(s.article_selector || "")}" style="width:100%"></div>
+        <div class="field"><label>Title selector</label><input type="text" id="edit-sel-title" value="${escapeHtml(s.title_selector || "")}" style="width:100%"></div>
+        <div class="field"><label>Link selector</label><input type="text" id="edit-sel-link" value="${escapeHtml(s.link_selector || "")}" style="width:100%"></div>
+        <div class="field"><label>Base URL (for relative links)</label><input type="text" id="edit-sel-base" value="${escapeHtml(s.base_url || "")}" style="width:100%"></div>
+        <div class="field"><label>Date selector (optional)</label><input type="text" id="edit-sel-date" value="${escapeHtml(s.date_selector || "")}" style="width:100%"></div>
+        <div class="field"><label>Image selector (optional)</label><input type="text" id="edit-sel-image" value="${escapeHtml(s.image_selector || "")}" style="width:100%"></div>
+      </div>
+      <div class="field">
+        <label>User-Agent override (optional)</label>
+        <input type="text" id="edit-user-agent" value="${escapeHtml(s.user_agent || "")}" style="width:100%">
+      </div>
+      <div style="margin-top: 14px;">
+        <button id="edit-save-btn" class="primary">Save changes</button>
+        <button id="edit-cancel-btn">Cancel</button>
+      </div>
+      <div id="edit-form-error" class="error-text"></div>
+    </div>`;
+}
+
+function openEditSourceForm(source) {
+  const form = document.getElementById("add-source-form");
+  form.innerHTML = editSourceFormHtml(source);
+  form.style.display = "block";
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  document.getElementById("edit-kind").addEventListener("change", (e) => {
+    document.getElementById("edit-css-fields").style.display = e.target.value === "css" ? "block" : "none";
+  });
+
+  document.getElementById("edit-cancel-btn").addEventListener("click", () => {
+    form.style.display = "none";
+    form.innerHTML = "";
+  });
+
+  document.getElementById("edit-save-btn").addEventListener("click", async () => {
+    const errorEl = document.getElementById("edit-form-error");
+    errorEl.textContent = "";
+
+    const name = document.getElementById("edit-name").value.trim();
+    const url = document.getElementById("edit-url").value.trim();
+    if (!name || !url) {
+      errorEl.textContent = "Name and URL are required.";
+      return;
+    }
+
+    const body = {
+      name,
+      category: document.getElementById("edit-category").value,
+      group_tag: document.getElementById("edit-group").value.trim() || null,
+      kind: document.getElementById("edit-kind").value,
+      url,
+      article_selector: document.getElementById("edit-sel-article").value.trim() || null,
+      title_selector: document.getElementById("edit-sel-title").value.trim() || null,
+      link_selector: document.getElementById("edit-sel-link").value.trim() || null,
+      base_url: document.getElementById("edit-sel-base").value.trim() || null,
+      date_selector: document.getElementById("edit-sel-date").value.trim() || null,
+      image_selector: document.getElementById("edit-sel-image").value.trim() || null,
+      user_agent: document.getElementById("edit-user-agent").value.trim() || null,
+    };
+
+    try {
+      await api(`/api/sources/${source.id}`, { method: "PUT", body: JSON.stringify(body) });
+      form.style.display = "none";
+      form.innerHTML = "";
+      loadSources();
+    } catch (e) {
+      errorEl.textContent = e.message;
+    }
+  });
 }
 
 document.getElementById("add-source-btn").addEventListener("click", () => {

@@ -297,6 +297,53 @@ all scraped identically once you have a feed URL or selectors.
    auto-detected feed turns out to be too broad, delete it and re-add
    manually with CSS selectors scoped to the right listing page.
 
+**Editing an already-added source**: `PUT /api/sources/{id}`
+(`SourceUpdate` in `web.py`) accepts every field a source has, including
+`kind` and `category` — both were originally missing from that model (only
+addable at creation), fixed once "modify an existing source" became a real
+need. `static/app.js`'s Sources tab has an "Edit" button per row
+(`openEditSourceForm()`) that reuses the same `#add-source-form` container
+the add-flow uses, pre-filled with the row's current values; unlike the
+add-flow it has no auto-detect step, since you're editing something that
+(presumably) already resolved to a working config once — it's a plain form
+covering every field at once, submitted as a single PUT. Same sparse-PUT
+contract as the rest of this API: an omitted field is left alone, not
+cleared, so you can't currently blank out an optional field (`user_agent`,
+`date_selector`, etc.) back to empty through this form — only replace it
+with a new value. **The edit form's own `kind` field switching to `css`
+does not client-side-validate that the selector fields got filled in** —
+if you save with them empty, the source just reports `"error"` status on
+its next scrape (`BeautifulSoup.select(None)` raises, caught by
+`scrape_source_safe()`'s broad exception handler), which is a real,
+visible-in-the-Sources-tab failure mode, not a crash. Acceptable given the
+existing safety net; not worth extra form validation for.
+
+**CSS-selector sources without a real per-article `href`**: some pages
+(CPPM's news listing is the concrete case this was built for) render each
+article's "link" as an `<a id="...">` used purely for in-page anchor
+navigation, with no `href` at all. `scrape_css()` falls back to that `id`
+when `href` is empty, constructing `<source url>#<id>` as the article's
+link — a genuine, distinct, working URL (it really does scroll to that
+section), even though every article on the page technically shares the
+same base URL. CPPM's actual config is a good worked example of this plus
+several other patterns at once: `article_selector: ".box"`,
+`title_selector: "h1.title"`, `link_selector: "a.anchor-section:last-of-type"`
+(the page emits three anchor `<a id>`s per article — a generic
+`"section_N_"` one, the raw untouched title, and a slug+hash one; `:last-of-type`
+reliably lands on the slug one without hardcoding a position count),
+`date_selector: "font i"`, `image_selector: ".content img"`.
+
+**French-language dates**: `parse_french_date()` handles "24 juil. 2026,
+09:09:38"-style text (CPPM's `date_selector` above relies on this) via a
+hand-built month-name lookup (`FRENCH_MONTHS`), not `strptime`'s `%B` --
+that's locale-dependent, and trusting the server to have a French locale
+installed would be fragile in exactly the same way the RFC822/ISO date
+handling elsewhere in this file already avoids trusting locale-sensitive
+parsing. This is a real, recurring need, not a one-off: CERN's `/fr/feed/`,
+IN2P3, and CNRS News are also French-language sources — if a new source's
+`date_selector` text isn't parsing, check whether it's a French date before
+assuming the selector itself is wrong.
+
 ## Social media sources
 
 `category = 'social'` was added after `website`/`newsletter` already

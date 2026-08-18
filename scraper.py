@@ -293,6 +293,38 @@ TEXT_DATE_PATTERNS = [
     (re.compile(r"\d{2}\.\d{2}\.\d{4}"), "%m.%d.%Y"),
 ]
 
+# French sites (CERN's /fr/feed/, IN2P3, CNRS News, CPPM) use "24 juil. 2026,
+# 09:09:38"-style dates -- not covered by TEXT_DATE_PATTERNS/strptime, which
+# is locale-dependent for month names anyway (relying on the server having a
+# French locale installed would be fragile). Parsed by hand instead, same
+# "don't trust locale-sensitive date parsing" reasoning as the RFC822/ISO
+# date handling elsewhere in this file.
+FRENCH_MONTHS = {
+    "janv": 1, "fevr": 2, "févr": 2, "mars": 3, "avr": 4, "mai": 5, "juin": 6,
+    "juil": 7, "aout": 8, "août": 8, "sept": 9, "oct": 10, "nov": 11, "dec": 12, "déc": 12,
+}
+FRENCH_DATE_RE = re.compile(
+    r"(\d{1,2})\s+([a-zéû]+)\.?\s+(\d{4})(?:,?\s*(\d{1,2}):(\d{2}):(\d{2}))?", re.I
+)
+
+
+def parse_french_date(text: str) -> datetime | None:
+    match = FRENCH_DATE_RE.search(text)
+    if not match:
+        return None
+    day, month_name, year, hour, minute, second = match.groups()
+    month = FRENCH_MONTHS.get(month_name.lower().rstrip("."))
+    if not month:
+        return None
+    try:
+        return datetime(
+            int(year), month, int(day),
+            int(hour or 0), int(minute or 0), int(second or 0),
+            tzinfo=timezone.utc,
+        )
+    except ValueError:
+        return None
+
 
 def parse_css_date(date_el) -> datetime | None:
     if date_el is None:
@@ -317,7 +349,7 @@ def parse_css_date(date_el) -> datetime | None:
         except ValueError:
             continue
 
-    return None
+    return parse_french_date(text)
 
 
 def resolve_url(href: str, base_url: str) -> str:
@@ -349,6 +381,16 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
 
         title = title_el.get_text(strip=True)
         href = link_el.get("href", "").strip()
+        if not href:
+            # Some pages (CPPM's news listing, e.g.) have no real per-article
+            # <a href>, only an in-page anchor id used for scroll-to-section
+            # navigation (<a id="...">, no href at all). Fall back to that:
+            # the article's "link" becomes the scraped page itself plus that
+            # anchor, which is a genuine, distinct, working URL even though
+            # it's not a separate page.
+            anchor_id = (link_el.get("id") or "").strip()
+            if anchor_id:
+                href = f"{source['url']}#{anchor_id}"
         if not href or not title:
             continue
         link = resolve_url(href, source["base_url"])

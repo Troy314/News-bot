@@ -46,6 +46,8 @@ class SourceIn(BaseModel):
 
 class SourceUpdate(BaseModel):
     name: str | None = None
+    kind: str | None = None  # "rss" | "css"
+    category: str | None = None  # "website" | "newsletter" | "social"
     url: str | None = None
     article_selector: str | None = None
     title_selector: str | None = None
@@ -147,6 +149,10 @@ def update_source(source_id: int, body: SourceUpdate):
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(400, "No fields to update")
+    if "kind" in fields and fields["kind"] not in ("rss", "css"):
+        raise HTTPException(400, "kind must be 'rss' or 'css'")
+    if "category" in fields and fields["category"] not in ("website", "newsletter", "social"):
+        raise HTTPException(400, "category must be 'website', 'newsletter', or 'social'")
 
     conn = db.get_conn()
     try:
