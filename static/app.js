@@ -85,7 +85,7 @@ function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
     ? `<span class="content-tag">${escapeHtml(article.content_tag)}</span>`
     : "";
   return `
-    <div class="card" data-source="${escapeHtml(article.source_name)}" data-tag="${escapeHtml(article.content_tag || "")}" data-group="${escapeHtml(article.source_group || "")}">
+    <div class="card" data-source="${escapeHtml(article.source_name)}" data-tag="${escapeHtml(article.content_tag || "")}">
       ${favBtn}
       ${image}
       <div class="card-body">
@@ -99,12 +99,11 @@ function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
     </div>`;
 }
 
-// Three independent filters (source, content topic, source group) combined
-// with AND -- each chip group is wired the same way via wireChips(), and
-// any one changing re-applies the combined filter over all three.
+// Two independent filters (source, content topic) combined with AND --
+// each chip group is wired the same way via wireChips(), and either one
+// changing re-applies the combined filter over both.
 const activeSources = new Set();
 const activeTags = new Set();
-const activeGroups = new Set();
 
 function wireChips(container, activeSet, dataKey) {
   container.querySelectorAll(".chip").forEach((chip) => {
@@ -123,13 +122,47 @@ function wireChips(container, activeSet, dataKey) {
   });
 }
 
+// Source chips are visually clustered by each source's group_tag (see
+// "Source groups" in CLAUDE.md) rather than having a separate group filter
+// row -- one flat chip list, sections just break onto their own line via
+// .chip-group-label's flex-basis:100%. Falls back to a plain unclustered
+// list when no source has a group set, so the common "haven't used groups
+// yet" case doesn't show an empty/pointless "Ungrouped" label.
 function renderSourceChips(container, articles) {
   const counts = {};
-  articles.forEach((a) => { counts[a.source_name] = (counts[a.source_name] || 0) + 1; });
+  const groupOf = {};
+  articles.forEach((a) => {
+    counts[a.source_name] = (counts[a.source_name] || 0) + 1;
+    groupOf[a.source_name] = a.source_group || null;
+  });
   const hues = sourceHues(Object.keys(counts));
   const names = Object.keys(counts).sort();
-  container.innerHTML = `<button class="chip chip-all active" data-source="__all__">All sources</button>` +
-    names.map((name) => `<button class="chip" style="--hue:${hues[name]}" data-source="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`).join("");
+  const chipHtml = (name) =>
+    `<button class="chip" data-hue="1" style="--hue:${hues[name]}" data-source="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`;
+
+  let html = `<button class="chip chip-all active" data-source="__all__">All sources</button>`;
+  const hasAnyGroup = names.some((name) => groupOf[name]);
+
+  if (!hasAnyGroup) {
+    html += names.map(chipHtml).join("");
+  } else {
+    const byGroup = new Map();
+    names.forEach((name) => {
+      const g = groupOf[name] || "Ungrouped";
+      if (!byGroup.has(g)) byGroup.set(g, []);
+      byGroup.get(g).push(name);
+    });
+    const groupNames = [...byGroup.keys()].sort((a, b) => {
+      if (a === "Ungrouped") return 1;
+      if (b === "Ungrouped") return -1;
+      return a.localeCompare(b);
+    });
+    groupNames.forEach((g) => {
+      html += `<span class="chip-group-label">${escapeHtml(g)}</span>` + byGroup.get(g).map(chipHtml).join("");
+    });
+  }
+
+  container.innerHTML = html;
   wireChips(container, activeSources, "source");
   return hues;
 }
@@ -141,19 +174,6 @@ function renderTagChips(container, articles) {
   container.innerHTML = `<button class="chip chip-all active" data-tag="__all__">All topics</button>` +
     names.map((name) => `<button class="chip" data-tag="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`).join("");
   wireChips(container, activeTags, "tag");
-}
-
-function renderGroupChips(container, articles) {
-  const counts = {};
-  articles.forEach((a) => { if (a.source_group) counts[a.source_group] = (counts[a.source_group] || 0) + 1; });
-  const names = Object.keys(counts).sort();
-  if (names.length === 0) {
-    container.innerHTML = "";
-    return;
-  }
-  container.innerHTML = `<button class="chip chip-all active" data-group-filter="__all__">All groups</button>` +
-    names.map((name) => `<button class="chip" data-group-filter="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`).join("");
-  wireChips(container, activeGroups, "groupFilter");
 }
 
 function dayLabel(pubDate) {
@@ -199,8 +219,7 @@ function applyFeedFilter() {
     dayGroup.querySelectorAll(".card").forEach((card) => {
       const sourceOk = activeSources.size === 0 || activeSources.has(card.dataset.source);
       const tagOk = activeTags.size === 0 || activeTags.has(card.dataset.tag);
-      const groupOk = activeGroups.size === 0 || activeGroups.has(card.dataset.group);
-      const show = sourceOk && tagOk && groupOk;
+      const show = sourceOk && tagOk;
       card.classList.toggle("hidden", !show);
       if (show) dayGroupVisible = true;
     });
@@ -224,11 +243,9 @@ async function loadFeed() {
   const noMatch = document.getElementById("feed-no-match");
   const chipsEl = document.getElementById("feed-chips");
   const tagChipsEl = document.getElementById("feed-tag-chips");
-  const groupChipsEl = document.getElementById("feed-group-chips");
 
   activeSources.clear();
   activeTags.clear();
-  activeGroups.clear();
   noMatch.style.display = "none";
 
   if (articlesRaw.length === 0) {
@@ -236,14 +253,12 @@ async function loadFeed() {
     empty.style.display = "block";
     chipsEl.innerHTML = "";
     tagChipsEl.innerHTML = "";
-    groupChipsEl.innerHTML = "";
     return;
   }
   empty.style.display = "none";
 
   const hues = renderSourceChips(chipsEl, articlesRaw);
   renderTagChips(tagChipsEl, articlesRaw);
-  renderGroupChips(groupChipsEl, articlesRaw);
 
   const groups = groupByDay(articlesRaw);
   const weekAgo = Date.now() - OPEN_BY_DEFAULT_MS;

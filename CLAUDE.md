@@ -555,23 +555,35 @@ upfront.
     was explicitly reverted in favor of one grid with day-dividers; if
     you're tempted to reintroduce a second view mode for the Feed tab,
     check first — it's been tried and undone once already.
-  - **Three independent chip filters**, combined with AND:
-    `renderSourceChips()` (colored by an alphabetically-stable hue
-    rotation — same `source_hues()` logic as `digest.py`, kept in sync
-    manually since this is plain JS with no shared module system with the
-    Python renderer), `renderTagChips()` (content topic, uncolored), and
-    `renderGroupChips()` (the free-text source `group_tag` — see "Source
-    groups" below; only rendered if at least one source has one set, so
-    an unused feature doesn't clutter the toolbar with an empty row). All
-    three share one `wireChips()` click handler (parameterized by which
-    `Set` and which `data-*` key each chip group uses) and one combined
-    `applyFeedFilter()`, which hides individual `.card`s by
-    `data-source`/`data-tag`/`data-group` *and* hides a whole `.day-group`
+  - **Two independent chip filters**, combined with AND: `renderSourceChips()`
+    (colored by an alphabetically-stable hue rotation — same `source_hues()`
+    logic as `digest.py`, kept in sync manually since this is plain JS with
+    no shared module system with the Python renderer) and `renderTagChips()`
+    (content topic, uncolored). Both share one `wireChips()` click handler
+    (parameterized by which `Set` and which `data-*` key each chip group
+    uses) and one combined `applyFeedFilter()`, which hides individual
+    `.card`s by `data-source`/`data-tag` *and* hides a whole `.day-group`
     if every card inside it got filtered out (mirrors `digest.py`'s
     empty-month-section hiding) — `#feed-no-match` shows only when a
     filter combination matches nothing, kept separate from `#feed-empty`
     (genuinely zero articles in the DB), since those need different
     messages.
+    - **There was briefly a third chip row for source `group_tag`, filtering
+      the same way as source/tag.** Explicitly removed in favor of
+      *visually clustering* the existing source chips by group instead —
+      `renderSourceChips()` groups source names by `source_group` (falling
+      back to an "Ungrouped" bucket sorted last) and inserts a
+      `.chip-group-label` (`flex-basis: 100%`, forcing a line break in the
+      `.chips` flex-wrap container) before each cluster, rather than adding
+      a parallel filter dimension. Falls back to one flat, unclustered chip
+      list when no source has a group set at all, so the common
+      "haven't used groups yet" case doesn't show a pointless "Ungrouped"
+      label. If you're tempted to bring back a separate group-filter row,
+      check first — same "tried and reverted" caution as the Grid/Timeline
+      toggle above; this was a deliberate simplification, not an oversight.
+      (The Sources tab's *own* group filter — a single-select chip row
+      alongside the health filter, `applySourceFilters()` — is unrelated
+      and unaffected; only the Feed tab's group filter was removed.)
   - A Small/Medium/Large card-size toggle (`applyFeedSize()`, reusing the
     `.view-toggle` segmented-button pattern), purely a `data-size` attribute
     on `#feed-days` that CSS attribute-selectors key off
@@ -611,7 +623,8 @@ Sources-tab sections); `group_tag` is whatever organizational scheme the
 user wants (e.g. "CNRS Labs", "Gravitational Wave", a country) and is
 entirely optional — a source with no group still works identically
 everywhere, and group-based UI (the Sources-tab group filter, the Feed
-tab's group chip row) simply doesn't render if no source has one set.
+tab's chip clustering) simply falls back to an ungrouped/flat rendering
+if no source has one set.
 
 Single value per source, not a multi-tag/join-table design — kept simple
 since nothing so far asked for a source belonging to more than one group.
@@ -622,9 +635,10 @@ needing to retype it — but it's still a plain text input underneath, so a
 typo creates a new group rather than erroring.
 
 Exposed on articles too (`sources.group_tag AS source_group` in `web.py`'s
-`list_articles` query) specifically so the Feed tab can filter by it
-without a second round-trip — group membership is a property of the
-*source*, but filtering naturally happens where the *articles* are.
+`list_articles` query) — the Feed tab uses this to *visually cluster* its
+source chips by group (see the Feed tab bullet above), not to filter; group
+membership is a property of the *source*, but the clustering naturally
+happens where the *articles*' chip list is built.
 
 ## Discord bot (`discord_bot.py`)
 
