@@ -1,5 +1,5 @@
 .env
-news.db
+news.db*
 bin/
 include/
 lib/

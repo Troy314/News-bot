@@ -154,6 +154,24 @@ def first_img_src(html: str | None) -> str | None:
     return normalize_image_url(src) if src else None
 
 
+TITLE_FALLBACK_MAX_LEN = 100
+
+
+def derive_title(description_html: str | None) -> str:
+    """Microblog-style RSS items (Mastodon toots, and social feeds
+    generally) often have no <title> at all -- a post isn't "titled"
+    content the way a blog post is, so the generator just omits the tag
+    rather than emitting an empty one. Falls back to the post's own text,
+    truncated at a word boundary, so those items aren't silently dropped
+    for lacking something they were never going to have."""
+    if not description_html:
+        return ""
+    text = BeautifulSoup(description_html, "html.parser").get_text(" ", strip=True)
+    if len(text) > TITLE_FALLBACK_MAX_LEN:
+        text = text[:TITLE_FALLBACK_MAX_LEN].rsplit(" ", 1)[0] + "…"
+    return text
+
+
 def extract_rss_image(item: ET.Element) -> str | None:
     thumb = item.find(f"{MEDIA_NS}thumbnail")
     if thumb is not None and thumb.get("url"):
@@ -196,6 +214,8 @@ def parse_feed_items(content: bytes):
         for item in items:
             title = (item.findtext("title") or "").strip()
             link = (item.findtext("link") or "").strip()
+            if not title:
+                title = derive_title(item.findtext("description"))
             if title and link:
                 yield {
                     "title": title,
@@ -491,6 +511,11 @@ def retag_all_articles() -> int:
 
 COMMON_FEED_PATHS = ["/feed/", "/rss.xml", "/feed.xml", "/rss/", "/atom.xml", "/index.rss"]
 
+# Appended to the *exact given URL's own path* (not the site's root origin)
+# -- covers per-account/per-page feeds like Reddit's "/r/name/.rss" or a
+# Mastodon-style "/@user.rss", which a site-root guess would never find.
+PATH_SUFFIXES = ["/.rss", ".rss", "/.atom", "/rss", "/rss.xml", "/feed"]
+
 
 def _looks_like_feed(content: bytes | None) -> bool:
     if not content:
@@ -503,12 +528,23 @@ def _looks_like_feed(content: bytes | None) -> bool:
 
 
 def detect_feed(url: str) -> str | None:
-    """Best-effort feed autodiscovery for a website URL: checks the page's
-    own <link rel=alternate> tags first, then a handful of common feed
-    paths. Returns the feed URL if one parses successfully, else None (the
-    caller should fall back to the manual CSS-selector form)."""
-    html = fetch_html(url)
-    if html:
+    """Best-effort feed autodiscovery for a website (or social profile) URL.
+    Order: (1) the given URL might already *be* a feed -- e.g. a YouTube
+    "feeds/videos.xml?channel_id=..." URL found by hand, since YouTube's
+    human-facing channel page is cookie-consent-walled and can't be
+    autodiscovered from, but the feed endpoint itself is plain public XML;
+    (2) the page's own <link rel=alternate> tags; (3) feed suffixes appended
+    to the *exact given URL* (Reddit's "/r/x/.rss", Mastodon-style
+    "/@user.rss" -- per-account feeds a site-root guess would miss); (4) a
+    handful of common paths against the site's root origin. Returns the feed
+    URL if one parses successfully, else None (the caller should fall back
+    to the manual CSS-selector form)."""
+    content = fetch_bytes(url, quiet=True)
+    if _looks_like_feed(content):
+        return url
+
+    if content:
+        html = content.decode("utf-8", errors="replace")
         soup = BeautifulSoup(html, "html.parser")
         for link in soup.find_all("link", rel="alternate"):
             feed_type = link.get("type", "")
@@ -517,6 +553,12 @@ def detect_feed(url: str) -> str | None:
                 candidate = urljoin(url, href)
                 if _looks_like_feed(fetch_bytes(candidate, quiet=True)):
                     return candidate
+
+    base = url.rstrip("/")
+    for suffix in PATH_SUFFIXES:
+        candidate = base + suffix
+        if _looks_like_feed(fetch_bytes(candidate, quiet=True)):
+            return candidate
 
     parsed = urlparse(url)
     origin = f"{parsed.scheme}://{parsed.netloc}"

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('rss', 'css')),
-    category TEXT NOT NULL DEFAULT 'website' CHECK(category IN ('website', 'newsletter')),
+    category TEXT NOT NULL DEFAULT 'website' CHECK(category IN ('website', 'newsletter', 'social')),
     url TEXT NOT NULL,
     article_selector TEXT,
     title_selector TEXT,
@@ -107,11 +107,34 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
 
+def _ensure_social_category(conn: sqlite3.Connection) -> None:
+    """SQLite can't ALTER a CHECK constraint in place -- when 'social' was
+    added to sources.category's allowed values, an existing sources table
+    (created under the old two-value constraint) needs a real
+    recreate-and-copy migration, not just an ALTER TABLE ADD COLUMN. Run
+    after _ensure_columns() so every column that might exist is already
+    there to copy. Detected by checking the table's own stored CREATE TABLE
+    SQL for the new value; a no-op once applied."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
+    if row is None or "'social'" in row["sql"]:
+        return
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("ALTER TABLE sources RENAME TO sources_old")
+    conn.executescript(SCHEMA)  # recreates `sources` under the current (new) constraint
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(sources_old)")]
+    column_list = ", ".join(columns)
+    conn.execute(f"INSERT INTO sources ({column_list}) SELECT {column_list} FROM sources_old")
+    conn.execute("DROP TABLE sources_old")
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
 def init_db() -> None:
     conn = get_conn()
     try:
         conn.executescript(SCHEMA)
         _ensure_columns(conn)
+        _ensure_social_category(conn)
         conn.commit()
         existing = {row["key"] for row in conn.execute("SELECT key FROM settings")}
         for key, value in DEFAULT_SETTINGS.items():

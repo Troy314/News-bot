@@ -378,9 +378,11 @@ async function loadSources() {
   state.sources = await api("/api/sources");
   const websites = state.sources.filter((s) => s.category === "website");
   const newsletters = state.sources.filter((s) => s.category === "newsletter");
+  const social = state.sources.filter((s) => s.category === "social");
 
   document.getElementById("website-sources").innerHTML = websites.map(renderSourceRow).join("") || '<p class="hint">None yet.</p>';
   document.getElementById("newsletter-sources").innerHTML = newsletters.map(renderSourceRow).join("") || '<p class="hint">None yet.</p>';
+  document.getElementById("social-sources").innerHTML = social.map(renderSourceRow).join("") || '<p class="hint">None yet.</p>';
 
   document.querySelectorAll(".toggle-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -419,7 +421,7 @@ document.querySelectorAll("#health-filter-chips .chip").forEach((chip) => {
 function sourceFormHtml() {
   return `
     <div class="card-form">
-      <h3>Add a website or newsletter</h3>
+      <h3>Add a source</h3>
       <div class="field">
         <label>Name</label>
         <input type="text" id="new-source-name" placeholder="e.g. CERN">
@@ -429,10 +431,21 @@ function sourceFormHtml() {
         <select id="new-source-category">
           <option value="website">Website</option>
           <option value="newsletter">Newsletter</option>
+          <option value="social">Social Media</option>
         </select>
       </div>
+      <div id="social-hint" class="hint" style="display:none; margin-bottom: 10px;">
+        Works well: Mastodon (paste the profile URL, e.g.
+        <code>https://mastodon.social/@user</code>), YouTube (paste the
+        channel's RSS URL directly if you have it, e.g.
+        <code>...youtube.com/feeds/videos.xml?channel_id=...</code>), Reddit
+        (paste the subreddit URL, e.g. <code>reddit.com/r/Physics</code>).
+        Not supported: Twitter/X, Instagram, Bluesky, Threads — they don't
+        expose a public feed, and this app won't try to bypass anti-bot
+        measures to scrape them.
+      </div>
       <div class="field">
-        <label>Website URL</label>
+        <label>URL</label>
         <input type="text" id="new-source-url" placeholder="https://example.com/news" style="width: 320px">
         <button id="detect-feed-btn">Auto-detect feed</button>
       </div>
@@ -459,6 +472,10 @@ document.getElementById("add-source-btn").addEventListener("click", () => {
   const form = document.getElementById("add-source-form");
   form.innerHTML = sourceFormHtml();
   form.style.display = "block";
+
+  document.getElementById("new-source-category").addEventListener("change", (e) => {
+    document.getElementById("social-hint").style.display = e.target.value === "social" ? "block" : "none";
+  });
 
   document.getElementById("detect-feed-btn").addEventListener("click", async () => {
     const url = document.getElementById("new-source-url").value.trim();

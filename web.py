@@ -31,7 +31,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 class SourceIn(BaseModel):
     name: str
     kind: str  # "rss" | "css"
-    category: str = "website"  # "website" | "newsletter"
+    category: str = "website"  # "website" | "newsletter" | "social"
     url: str
     article_selector: str | None = None
     title_selector: str | None = None
@@ -107,8 +107,8 @@ def detect_feed(body: DetectFeedIn):
 def create_source(body: SourceIn):
     if body.kind not in ("rss", "css"):
         raise HTTPException(400, "kind must be 'rss' or 'css'")
-    if body.category not in ("website", "newsletter"):
-        raise HTTPException(400, "category must be 'website' or 'newsletter'")
+    if body.category not in ("website", "newsletter", "social"):
+        raise HTTPException(400, "category must be 'website', 'newsletter', or 'social'")
     if body.kind == "css":
         missing = [
             f for f in ("article_selector", "title_selector", "link_selector", "base_url")

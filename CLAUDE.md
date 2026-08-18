@@ -214,18 +214,37 @@ through `get_articles()` instead.
 
 ## Adding a source
 
-Two-tier, matching the web UI's "Add website / newsletter" form:
-1. **Auto-detect** (`scraper.detect_feed(url)`): checks the page's own
-   `<link rel="alternate" type="application/rss+xml|atom+xml">` tags
-   first, then a fixed list of common paths (`COMMON_FEED_PATHS`:
-   `/feed/`, `/rss.xml`, `/feed.xml`, `/rss/`, `/atom.xml`,
-   `/index.rss`) against the URL's origin. Each candidate is verified by
-   actually parsing it (`_looks_like_feed`), not just checking the HTTP
-   status — a 200 with an HTML error page is a real failure mode this
-   guards against. Probing 404s here are *expected*, not errors — they're
-   logged at `debug`, not `error` (`quiet=True` on the fetch helpers), so
-   a normal "no feed, fall back to manual" outcome doesn't spam the log
-   like a real failure would.
+Two-tier detection, matching the web UI's "Add source" form (`category` is
+a separate, orthogonal choice — `website`/`newsletter`/`social`, purely a
+UI grouping, all scraped identically once you have a feed URL or selectors):
+1. **Auto-detect** (`scraper.detect_feed(url)`), checked in this order:
+   1. **The given URL might already *be* a feed** — e.g. a YouTube
+      `feeds/videos.xml?channel_id=...` URL found by hand and pasted
+      directly. Checked first (one fetch, its result reused for the next
+      step too if it's *not* already a feed) since it's the cheapest and
+      most certain check.
+   2. The page's own `<link rel="alternate" type="application/rss+xml|
+      atom+xml">` tags.
+   3. Feed suffixes (`PATH_SUFFIXES`: `/.rss`, `.rss`, `/.atom`, `/rss`,
+      `/rss.xml`, `/feed`) appended to the **exact given URL's own path**
+      — covers per-account feeds a site-root guess would never find, like
+      Reddit's `/r/name/.rss` or Mastodon's `/@user.rss`.
+   4. A fixed list of common paths (`COMMON_FEED_PATHS`: `/feed/`,
+      `/rss.xml`, `/feed.xml`, `/rss/`, `/atom.xml`, `/index.rss`) against
+      the URL's **root origin** — for site-wide blog feeds.
+
+   Every candidate is verified by actually parsing it (`_looks_like_feed`),
+   not just checking the HTTP status — a 200 with an HTML error page is a
+   real failure mode this guards against. Probing 404s here are *expected*,
+   not errors — logged at `debug`, not `error` (`quiet=True` on the fetch
+   helpers), so a normal "no feed, fall back to manual" outcome doesn't
+   spam the log like a real failure would. **Known limitation, not chased
+   further**: if step 3's more-specific candidate transiently fails (a
+   rate limit, a network blip — observed on Reddit during rapid testing)
+   but step 4's less-specific one happens to succeed, the function returns
+   a technically-valid but too-broad feed with no retry. The web UI shows
+   the discovered feed URL before you commit to adding it specifically so
+   this is visible/reviewable, not just silently wrong.
 2. **Manual CSS selectors** (the same shape `seed_sources.py`'s 5 CSS
    sources use): when no feed is found, the form asks for
    article/title/link/base-url selectors plus optional date/image ones.
@@ -236,7 +255,18 @@ Two-tier, matching the web UI's "Add website / newsletter" form:
    and explicitly not built (see the original chat's "Add source" design
    question) — it would be unreliable enough that it'd need manual
    correction almost every time anyway, no better than just asking for
-   selectors directly.
+   selectors directly. **Practical steps for finding selectors**: open the
+   page, right-click one article/story card → Inspect. Find the smallest
+   element that wraps one whole story and repeats once per story (its tag
+   + class, e.g. `div.post-card`) — that's the article container. Inside
+   it, find the title text's element (`title_selector`) and the `<a>` tag
+   for the link (`link_selector`, often the same element as the title, or
+   its direct parent). `base_url` is just the site's origin, used to
+   resolve relative `href`s. Avoid a browser's "Copy selector" devtools
+   command for this — it produces an over-specific path (often with
+   `:nth-child(3)`-style indices) matching only *that one* element, not
+   every story on the page; a plain class-based selector generalizes,
+   an indexed path doesn't.
 3. **A generic auto-discovery *website-wide* feed existing doesn't mean
    it's the right one** — several real sources hit this: IN2P3's
    `/rss.xml`, IPPOG's `/rss.xml`, and CNRS News' `/rss.xml` all exist and
@@ -247,6 +277,65 @@ Two-tier, matching the web UI's "Add website / newsletter" form:
    for. `detect_feed()` can't detect this automatically; if a newly-added
    auto-detected feed turns out to be too broad, delete it and re-add
    manually with CSS selectors scoped to the right listing page.
+
+## Social media sources
+
+`category = 'social'` was added after `website`/`newsletter` already
+existed — since SQLite can't `ALTER` a `CHECK` constraint in place,
+`db._ensure_social_category()` does a real recreate-and-copy migration
+(rename `sources` → `sources_old`, recreate under the new constraint from
+`SCHEMA`, copy every column back via `PRAGMA table_info` so it doesn't need
+updating if more columns get added later, drop the old table) — verified
+against the real production DB (23 sources, 197 articles at the time)
+before trusting it, with `PRAGMA foreign_keys` toggled off/on around the
+swap so `articles.source_id` references survive the rename. Runs once at
+startup via `init_db()`, after `_ensure_columns()` so there's a complete
+column set to copy, and is a no-op forever after via a check against the
+table's own stored `CREATE TABLE` SQL text.
+
+**Which platforms actually work, verified against real accounts, not
+assumed:**
+- **Mastodon** — works well. Every account has a public `/@user.rss` feed,
+  auto-discovered via the profile page's own `<link rel=alternate>` tag
+  with zero extra code. Verified against `@Mastodon@mastodon.social` (20
+  real posts parsed correctly).
+- **Reddit** — works. `/r/<subreddit>/.rss` is public and un-authenticated;
+  found via the new path-suffix detection tier above (not autodiscovery —
+  Reddit's subreddit pages don't carry a scoped `<link>` tag). Subject to
+  Reddit's own rate limiting on rapid repeated requests (see the
+  known-limitation note above).
+- **YouTube** — partially works, with a real constraint: the human-facing
+  channel page (`youtube.com/@handle`) is behind a cookie-consent wall that
+  a plain `requests` fetch can't get past (confirmed: got a consent-wall
+  page, not the real channel page), so the channel ID can't be
+  auto-discovered from a pasted profile URL. **Bypassing a consent wall
+  wasn't attempted or built — that's a legal/regulatory gate, not a
+  technical obstacle to route around.** What does work: the feed endpoint
+  itself, `youtube.com/feeds/videos.xml?channel_id=...` (or the older
+  `?user=<legacy-username>` form, for channels that still have one — e.g.
+  `?user=fermilab` was verified working), is plain public XML with no
+  wall. If you already have or can find your channel's feed URL by hand,
+  paste *that* directly into the URL field — `detect_feed()`'s first check
+  is "is the given URL already a feed," so it's accepted immediately with
+  no further discovery needed.
+- **Not supported, and not planned**: Twitter/X, Instagram, Threads,
+  Bluesky. None expose a public feed for arbitrary accounts, and reaching
+  their content would mean building around anti-bot/auth measures — the
+  same principle already established elsewhere in this project (see the
+  SuperSoluce/PSNProfiles-icon history in earlier design notes): don't
+  build a bypass for a real access control, use a different source instead.
+
+**Real bug this surfaced and fixed, not social-specific despite being
+found there**: Mastodon toots have **no `<title>` element at all** in
+their RSS `<item>` — a toot isn't titled content the way a blog post is,
+so Mastodon's feed generator omits the tag entirely rather than emitting
+an empty one. `parse_feed_items()` required both `title` and `link` to
+yield an item, so every toot was silently dropped (0 articles found, no
+error — status `"empty"`, correctly not `"error"`, since the fetch and
+parse both genuinely succeeded). Fixed generally, not as a Mastodon
+special-case: `derive_title()` falls back to the item's own `description`
+text (stripped of HTML, truncated at a word boundary) whenever `<title>`
+is missing — benefits *any* titleless RSS item, not just Mastodon's.
 
 ## Notification flow ("send *new* news")
 
