@@ -580,7 +580,26 @@ document.getElementById("subscribe-btn").addEventListener("click", async () => {
 });
 
 // -------------------------------------------------------------------------
+// Feed card size (Small/Medium/Large, persisted)
+// -------------------------------------------------------------------------
+
+const FEED_SIZE_KEY = "newsbot-feed-size";
+
+function applyFeedSize(size) {
+  document.getElementById("feed-days").dataset.size = size;
+  document.querySelectorAll("#size-toggle .view-toggle-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.size === size);
+  });
+  localStorage.setItem(FEED_SIZE_KEY, size);
+}
+
+document.querySelectorAll("#size-toggle .view-toggle-btn").forEach((btn) => {
+  btn.addEventListener("click", () => applyFeedSize(btn.dataset.size));
+});
+
+// -------------------------------------------------------------------------
 // Init
 // -------------------------------------------------------------------------
 
+applyFeedSize(localStorage.getItem(FEED_SIZE_KEY) || "medium");
 loadFeed();

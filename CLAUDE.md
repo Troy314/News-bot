@@ -344,6 +344,16 @@ upfront.
     section hiding) — `#feed-no-match` shows only when a filter combination
     matches nothing, kept separate from `#feed-empty` (genuinely zero
     articles in the DB), since those need different messages.
+  - A Small/Medium/Large card-size toggle (`applyFeedSize()`, reusing the
+    `.view-toggle` segmented-button pattern), purely a `data-size` attribute
+    on `#feed-days` that CSS attribute-selectors key off
+    (`#feed-days[data-size="small"] .grid { ... }` etc) — Medium is the
+    unmodified default, so only Small/Large need actual overrides. Setting
+    the attribute once on the (always-present, never-replaced) `#feed-days`
+    element means it survives `loadFeed()` re-rendering its `innerHTML`
+    without needing to be reapplied after every fetch. Persisted to
+    `localStorage` (`newsbot-feed-size`), applied before the first
+    `loadFeed()` call so there's no flash of the wrong size on load.
   - A ☆/★ favorite toggle per card, and "Check for news now"
     (`POST /api/run-now` — this literally calls `scheduler.run_daily_job()`,
     same code path as the daily schedule and `!forcedigest`, so testing
