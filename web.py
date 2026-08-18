@@ -95,7 +95,19 @@ def _source_row_to_dict(row) -> dict:
 def list_sources():
     conn = db.get_conn()
     try:
-        rows = conn.execute("SELECT * FROM sources ORDER BY category, name").fetchall()
+        # SQLite-specific (not standard SQL) but well-documented behavior:
+        # grouping with MAX() in the SELECT list guarantees the other,
+        # non-aggregated columns come from the same row that produced the
+        # MAX value -- exactly "this source's most recently published
+        # article", in one query rather than a per-source round-trip.
+        rows = conn.execute(
+            "SELECT sources.*, latest.title AS latest_title, latest.link AS latest_link, "
+            "latest.pub_date AS latest_pub_date FROM sources "
+            "LEFT JOIN ("
+            "  SELECT source_id, title, link, MAX(pub_date) AS pub_date FROM articles GROUP BY source_id"
+            ") AS latest ON latest.source_id = sources.id "
+            "ORDER BY sources.category, sources.name"
+        ).fetchall()
         return [_source_row_to_dict(r) for r in rows]
     finally:
         conn.close()

@@ -191,12 +191,18 @@ label { font-size: 12.5px; color: #b7bac1; display: block; margin-bottom: 4px; }
 
 /* Sources list */
 .source-row {
-  display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 14px;
   background: #1e1f24; border: 1px solid #2a2b30; border-radius: 8px; margin-bottom: 8px;
 }
 .source-row .name { font-weight: 600; flex: 1; }
 .source-row .meta { color: #6b6e75; font-size: 12px; }
 .source-row.disabled { opacity: 0.5; }
+.latest-article {
+  flex-basis: 100%; font-size: 12.5px; color: #8a8d94;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.latest-article a { color: #9aa5ff; text-decoration: none; }
+.latest-article a:hover { text-decoration: underline; }
 .health-badge { font-size: 12px; color: #8a8d94; white-space: nowrap; cursor: help; }
 
 .card-form {

@@ -610,6 +610,17 @@ upfront.
   since "show me the broken ones" / "show me just this group" are each a
   mutually-exclusive question within their own row, not a combinable one),
   and the add-source flow described above.
+  - Each row also shows its **latest scraped article** as a second line
+    (`renderLatestArticle()`, "No articles scraped yet." for a source that
+    genuinely hasn't produced one — freshly-added sources before their
+    first successful scrape are the common case). `web.py`'s
+    `list_sources()` gets this in the same query as the source list itself,
+    via a `LEFT JOIN` on a `GROUP BY source_id` subquery using SQLite's
+    documented (if non-standard-SQL) bare-column-with-MAX() behavior: the
+    other selected columns (`title`, `link`) come from the *same row* that
+    produced the `MAX(pub_date)`, not an arbitrary one — verified against
+    real data before relying on it. One query per Sources-tab load, not
+    one per source.
 - **Settings**: digest schedule (see the restart caveat above), Discord
   channel id, and newsletter subscriber management.
 

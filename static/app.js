@@ -400,6 +400,13 @@ function renderHealthBadge(s) {
   return `<span class="health-badge" title="${escapeHtml(tooltip)}">${info.icon} ${escapeHtml(timeAgo(s.last_checked_at))}</span>`;
 }
 
+function renderLatestArticle(s) {
+  if (!s.latest_title || !s.latest_link) {
+    return `<span class="latest-article hint">No articles scraped yet.</span>`;
+  }
+  return `<span class="latest-article">Latest: <a href="${escapeHtml(s.latest_link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.latest_title)}</a>${s.latest_pub_date ? ` · ${escapeHtml(timeAgo(s.latest_pub_date))}` : ""}</span>`;
+}
+
 function renderSourceRow(s) {
   const groupBadge = s.group_tag ? `<span class="content-tag">${escapeHtml(s.group_tag)}</span>` : "";
   return `
@@ -411,6 +418,7 @@ function renderSourceRow(s) {
       <button class="edit-btn" data-id="${s.id}">Edit</button>
       <button class="toggle-btn" data-id="${s.id}" data-enabled="${s.enabled}">${s.enabled ? "Disable" : "Enable"}</button>
       <button class="danger delete-btn" data-id="${s.id}">Delete</button>
+      ${renderLatestArticle(s)}
     </div>`;
 }
 
