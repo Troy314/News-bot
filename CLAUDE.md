@@ -565,12 +565,13 @@ upfront.
   `<summary>`, same established pattern as `digest.py`'s month-sections)
   with a vertical accent line (`.day-group { border-left: ... }`)
   separating one day's cluster from the next. **Days within the last
-  week (`OPEN_BY_DEFAULT_MS`, 7 days) open by default; older days
+  month (`OPEN_BY_DEFAULT_MS`, 30 days) open by default; older days
   collapsed** — checked per-group against that group's own articles'
-  `pub_date`, not just "is this the first/most-recent group in the list"
-  (an earlier version only auto-opened the single most recent day; that
-  was widened to a rolling week on request, since a day-by-day expand
-  click for "what happened this week" was tedious).
+  `pub_date`, not just "is this the first/most-recent group in the list".
+  Widened twice on request: first from "only the single most recent day"
+  to a rolling week (day-by-day expand-clicking was tedious), then from a
+  week to a month. If this needs widening again, it's just the one
+  constant.
   - **This replaced an earlier separate Grid/Timeline toggle** — a
     distinct vertical-list-with-dots view, switched via two buttons. That
     was explicitly reverted in favor of one grid with day-dividers; if

@@ -197,7 +197,7 @@ function groupByDay(articles) {
   return groups;
 }
 
-const OPEN_BY_DEFAULT_MS = 7 * 24 * 60 * 60 * 1000; // keep the last week's days expanded
+const OPEN_BY_DEFAULT_MS = 30 * 24 * 60 * 60 * 1000; // keep the last month's days expanded
 
 function renderDayGroup(articles, hues, isOpen) {
   const cards = articles.map((a) => renderCard(a, hues)).join("");
@@ -261,11 +261,11 @@ async function loadFeed() {
   renderTagChips(tagChipsEl, articlesRaw);
 
   const groups = groupByDay(articlesRaw);
-  const weekAgo = Date.now() - OPEN_BY_DEFAULT_MS;
+  const openSince = Date.now() - OPEN_BY_DEFAULT_MS;
   let html = "";
   for (const [, group] of groups) {
     const pubDate = group[0].pub_date;
-    const isRecent = pubDate ? new Date(pubDate).getTime() >= weekAgo : false;
+    const isRecent = pubDate ? new Date(pubDate).getTime() >= openSince : false;
     html += renderDayGroup(group, hues, isRecent);
   }
   daysEl.innerHTML = html;
