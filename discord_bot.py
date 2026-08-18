@@ -57,7 +57,7 @@ def make_embed(article: scraper.Article) -> discord.Embed:
         color=discord.Color.blurple(),
         timestamp=article.pub_date or datetime.now(timezone.utc),
     )
-    embed.set_footer(text=f"Source: {article.source_name}")
+    embed.set_footer(text=f"Source: {article.source_name} · {article.content_tag}")
     if article.image_url:
         embed.set_image(url=article.image_url)
     return embed
@@ -71,8 +71,9 @@ def build_digest_file(articles: list[scraper.Article], page_title: str, filename
 
 
 async def notify_discord(articles: list[scraper.Article]) -> bool:
-    """Post the given (already-new) articles to the configured channel as a
-    downloadable digest file, pinging @everyone. Returns whether it sent."""
+    """Post the given (already-new) articles to the configured channel as
+    individual embeds (not a digest file), pinging @everyone once up front.
+    Returns whether anything sent."""
     channel_id = get_news_channel_id()
     if channel_id == 0:
         logger.info("news_channel_id isn't set -- skipping Discord notification.")
@@ -83,16 +84,17 @@ async def notify_discord(articles: list[scraper.Article]) -> bool:
         logger.warning(f"Could not find Discord channel with id {channel_id}")
         return False
 
-    file = build_digest_file(articles, "New Particle Physics News", "digest")
     try:
         await channel.send(
-            content=f"@everyone {len(articles)} new article(s) today — here's the digest.",
-            file=file,
+            content=f"@everyone {len(articles)} new article(s) today:",
             allowed_mentions=discord.AllowedMentions(everyone=True),
         )
+        # Oldest first, so the channel reads top-to-bottom chronologically.
+        for article in reversed(articles):
+            await channel.send(embed=make_embed(article))
         return True
     except discord.DiscordException as e:
-        logger.error(f"Failed to send digest to Discord: {e}")
+        logger.error(f"Failed to send articles to Discord: {e}")
         return False
 
 
@@ -105,6 +107,7 @@ async def on_ready():
     import scheduler  # lazy: scheduler imports this module too
 
     scheduler.start()
+    await scheduler.catch_up_if_missed()
 
 
 @bot.command(name="news")
@@ -128,7 +131,7 @@ async def news_command(ctx: commands.Context, site: str = None):
             await ctx.send(f"Unknown site `{site}`. Available: `{available}`")
             return
 
-        articles = scraper.scrape_source(source)
+        articles = scraper.scrape_source_safe(source)
         scraper.persist_articles(articles)
         if not articles:
             await ctx.send(f"No articles found for `{source['name']}` (the feed/page may be temporarily unreachable).")

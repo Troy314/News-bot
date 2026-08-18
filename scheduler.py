@@ -7,7 +7,7 @@ in Settings (default 8:00 Europe/Paris); also runnable on demand via
 """
 
 import logging
-from datetime import time as dtime
+from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
 from discord.ext import tasks
@@ -21,6 +21,18 @@ import discord_bot
 logger = logging.getLogger("news_bot.scheduler")
 
 
+def _current_timezone() -> ZoneInfo:
+    return ZoneInfo(db.get_setting("digest_timezone", "Europe/Paris"))
+
+
+def _mark_ran_today() -> None:
+    """Record that the daily job ran today (regardless of whether anything was
+    new) -- catch_up_if_missed() uses this to tell "already checked today" from
+    "app wasn't running when it should have checked"."""
+    today = datetime.now(_current_timezone()).strftime("%Y-%m-%d")
+    db.set_setting("last_digest_run_date", today)
+
+
 async def run_daily_job() -> bool:
     """Scrape all sources, persist new articles, and notify Discord + email
     subscribers if there's anything new. Returns whether anything was sent."""
@@ -29,6 +41,7 @@ async def run_daily_job() -> bool:
 
     if not new_ids:
         logger.info("No new articles since the last run.")
+        _mark_ran_today()
         return False
 
     new_articles = scraper.get_articles(ids=new_ids)
@@ -45,14 +58,35 @@ async def run_daily_job() -> bool:
         logger.info(f"Emailed digest to {sent_emails} subscriber(s).")
 
     scraper.mark_notified(new_ids)
+    _mark_ran_today()
     return sent_discord or bool(sent_emails)
 
 
 def _digest_schedule_time() -> dtime:
     hour = int(db.get_setting("digest_hour", "8"))
     minute = int(db.get_setting("digest_minute", "0"))
-    tz = ZoneInfo(db.get_setting("digest_timezone", "Europe/Paris"))
-    return dtime(hour=hour, minute=minute, tzinfo=tz)
+    return dtime(hour=hour, minute=minute, tzinfo=_current_timezone())
+
+
+async def catch_up_if_missed() -> None:
+    """Called once on startup: if the app wasn't running at today's scheduled
+    time (PC was off, crashed, etc), run the daily job immediately instead of
+    silently waiting until tomorrow's schedule -- "missed" news still gets
+    sent, just late instead of never. A no-op if today's run already happened
+    (scheduled or manual), or if today's scheduled time hasn't arrived yet."""
+    now = datetime.now(_current_timezone())
+    today = now.strftime("%Y-%m-%d")
+
+    if db.get_setting("last_digest_run_date", "") == today:
+        logger.info("Daily digest already ran today -- nothing missed.")
+        return
+    if now.time() < _digest_schedule_time().replace(tzinfo=None):
+        logger.info("Today's scheduled digest time hasn't arrived yet -- nothing missed.")
+        return
+
+    logger.info(f"Missed today's {_digest_schedule_time().strftime('%H:%M')} digest "
+                "(app wasn't running) -- catching up now.")
+    await run_daily_job()
 
 
 # tasks.loop needs its `time=` argument at decoration time, so the schedule

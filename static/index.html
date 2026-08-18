@@ -22,10 +22,15 @@
         <button id="run-now-btn">Check for news now</button>
         <span id="run-now-status" class="hint"></span>
         <div class="spacer"></div>
+        <div class="view-toggle">
+          <button id="view-grid-btn" class="view-toggle-btn active">Grid</button>
+          <button id="view-timeline-btn" class="view-toggle-btn">Timeline</button>
+        </div>
         <a class="btn" href="/api/digest.html" target="_blank">Download full digest</a>
       </div>
       <div id="feed-chips" class="chips"></div>
       <div id="feed-grid" class="grid"></div>
+      <div id="feed-timeline" class="timeline" style="display:none"></div>
       <div id="feed-empty" class="empty-state" style="display:none">No articles yet — click "Check for news now" or wait for the daily run.</div>
     </section>
 

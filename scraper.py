@@ -27,6 +27,39 @@ REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (compatible; NewsScraperBot/1.0)"
 
 
+class ScrapeError(Exception):
+    """Raised when a source's fetch/parse fails outright (network error, non-200,
+    totally malformed response) -- as opposed to fetching fine but finding zero
+    articles, which is a distinct ("empty") outcome, not necessarily broken."""
+
+
+# Ordered, first-match-wins keyword rules for content-based tagging. Title
+# text is all we reliably have across every source (CSS-scraped sources have
+# no body/description at all, and RSS descriptions vary wildly in quality),
+# so this classifies on title only -- deliberately simple, no ML/API call,
+# tuned against real titles seen across this project's 20 sources (obituaries
+# in "(1931-2025)" parenthetical form, "X welcomes its new management"
+# spokesperson posts, CERN Courier's old jobs-feed-style postings, etc).
+CONTENT_TAG_RULES = [
+    ("Obituary", re.compile(r"\bobituary\b|\bin memoriam\b|\bin memory of\b|passed away|\bdies at\b|\(\d{4}[–-]\d{4}\)", re.I)),
+    ("Award", re.compile(r"\baward\b|\bprize\b|\bnobel\b|\bmedal\b|\bhonou?r\b", re.I)),
+    ("Personnel", re.compile(r"\bspokesperson\b|\bappoint|welcomes its new|new (team|management)|\belected\b|new director", re.I)),
+    ("Discovery", re.compile(r"\bdiscover|\bobserv|\bdetect|\bevidence\b|\bmeasur|\bbreakthrough\b|first[- ]ever|\breveals?\b", re.I)),
+    ("Event", re.compile(r"\bworkshop\b|\bconference\b|\bsymposium\b|\bsummit\b|\bseminar\b", re.I)),
+    ("Jobs", re.compile(r"\bpostdoc\b|\bvacanc|\bhiring\b|\bphd (studentship|position)|\bjob (opening|posting)\b", re.I)),
+    ("Funding", re.compile(r"\bfunding\b|\bbudget\b|\bgrant\b|[£$]\d|\bmillion\b|\binvest", re.I)),
+    ("Outreach", re.compile(r"\bstudent|\bschool\b|\beducation\b|\boutreach", re.I)),
+]
+DEFAULT_CONTENT_TAG = "News"
+
+
+def classify_article(title: str) -> str:
+    for tag, pattern in CONTENT_TAG_RULES:
+        if pattern.search(title):
+            return tag
+    return DEFAULT_CONTENT_TAG
+
+
 class Article:
     def __init__(
         self,
@@ -36,6 +69,7 @@ class Article:
         source_name: str,
         pub_date: datetime | None = None,
         image_url: str | None = None,
+        content_tag: str | None = None,
     ):
         self.title = title.strip()
         self.link = link.strip()
@@ -43,6 +77,7 @@ class Article:
         self.source_name = source_name
         self.pub_date = pub_date
         self.image_url = image_url.strip() if image_url else None
+        self.content_tag = content_tag or classify_article(self.title)
 
     def __repr__(self):
         return f"<Article {self.source_name!r} {self.title!r}>"
@@ -183,7 +218,7 @@ def scrape_rss(source: "sqlite3.Row") -> list[Article]:
     user_agent = source["user_agent"] or USER_AGENT
     content = fetch_bytes(source["url"], user_agent)
     if not content:
-        return []
+        raise ScrapeError(f"Could not fetch {source['url']}")
 
     try:
         entries = list(parse_feed_items(content))
@@ -194,12 +229,11 @@ def scrape_rss(source: "sqlite3.Row") -> list[Article]:
         logger.warning(f"Feed for {source['name']} failed to parse ({e}), retrying once...")
         content = fetch_bytes(source["url"], user_agent)
         if not content:
-            return []
+            raise ScrapeError(f"Could not fetch {source['url']} (retry)")
         try:
             entries = list(parse_feed_items(content))
         except ET.ParseError as e2:
-            logger.error(f"Failed to parse feed for {source['name']}: {e2}")
-            return []
+            raise ScrapeError(f"Feed did not parse: {e2}")
 
     return [
         Article(
@@ -264,7 +298,7 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
     user_agent = source["user_agent"] or USER_AGENT
     html = fetch_html(source["url"], user_agent)
     if not html:
-        return []
+        raise ScrapeError(f"Could not fetch {source['url']}")
 
     soup = BeautifulSoup(html, "html.parser")
     containers = soup.select(source["article_selector"])
@@ -314,13 +348,46 @@ def scrape_source(source: "sqlite3.Row") -> list[Article]:
     return scrape_css(source)
 
 
+def _record_source_health(source_id: int, status: str, error: str | None) -> None:
+    conn = db.get_conn()
+    try:
+        conn.execute(
+            "UPDATE sources SET last_checked_at = datetime('now'), last_status = ?, last_error = ? "
+            "WHERE id = ?",
+            (status, error, source_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def scrape_source_safe(source: "sqlite3.Row") -> list[Article]:
+    """scrape_source(), but never raises, and always records the source's
+    health (last_checked_at/last_status/last_error) as a side effect -- this
+    is what powers the Sources tab's "is this working" indicator. Status is
+    "ok" (fetched, found articles), "empty" (fetched fine, zero articles --
+    often means CSS selectors need updating), or "error" (fetch/parse
+    genuinely failed)."""
+    try:
+        articles = scrape_source(source)
+        status, error = ("ok" if articles else "empty"), None
+    except ScrapeError as e:
+        articles, status, error = [], "error", str(e)
+    except Exception as e:
+        logger.exception(f"Unexpected error scraping {source['name']}")
+        articles, status, error = [], "error", str(e)
+
+    _record_source_health(source["id"], status, error)
+    return articles
+
+
 def scrape_all_sources() -> dict[str, list[Article]]:
     conn = db.get_conn()
     try:
         sources = conn.execute("SELECT * FROM sources WHERE enabled = 1").fetchall()
     finally:
         conn.close()
-    return {s["name"]: scrape_source(s) for s in sources}
+    return {s["name"]: scrape_source_safe(s) for s in sources}
 
 
 # --------------------------------------------------------------------------
@@ -337,9 +404,9 @@ def persist_articles(articles: list[Article]) -> list[int]:
     try:
         for a in articles:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO articles (source_id, title, link, pub_date, image_url) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (a.source_id, a.title, a.link, a.pub_date.isoformat() if a.pub_date else None, a.image_url),
+                "INSERT OR IGNORE INTO articles (source_id, title, link, pub_date, image_url, content_tag) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (a.source_id, a.title, a.link, a.pub_date.isoformat() if a.pub_date else None, a.image_url, a.content_tag),
             )
             if cur.rowcount:
                 new_ids.append(cur.lastrowid)
@@ -355,6 +422,29 @@ def scrape_and_persist_all() -> list[int]:
     results = scrape_all_sources()
     all_articles = [a for articles in results.values() for a in articles]
     return persist_articles(all_articles)
+
+
+def backfill_content_tags() -> int:
+    """One-time (but safely re-runnable) backfill: compute content_tag for
+    any article that predates the tagging feature. Article.__init__ already
+    falls back to classify_article() transparently on read, so this isn't
+    required for correctness -- it's here so every consumer (in particular
+    web.py's /api/articles, which reads raw rows via its own SQL rather than
+    through Article) sees a real value without each one needing its own
+    fallback. Returns how many rows were updated."""
+    conn = db.get_conn()
+    try:
+        rows = conn.execute("SELECT id, title FROM articles WHERE content_tag IS NULL").fetchall()
+        if not rows:
+            return 0
+        conn.executemany(
+            "UPDATE articles SET content_tag = ? WHERE id = ?",
+            [(classify_article(r["title"]), r["id"]) for r in rows],
+        )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------
@@ -406,6 +496,10 @@ def detect_feed(url: str) -> str | None:
 
 def _row_to_article(row) -> Article:
     pub_date = datetime.fromisoformat(row["pub_date"]) if row["pub_date"] else None
+    # content_tag is None for rows scraped before this feature existed --
+    # Article.__init__ transparently backfills it via classify_article() on
+    # read, no migration script needed. It's just not written back to the
+    # row, so it's recomputed (cheap: a handful of regex checks) each time.
     article = Article(
         title=row["title"],
         link=row["link"],
@@ -413,6 +507,7 @@ def _row_to_article(row) -> Article:
         source_name=row["source_name"],
         pub_date=pub_date,
         image_url=row["image_url"],
+        content_tag=row["content_tag"] if "content_tag" in row.keys() else None,
     )
     article.id = row["id"]
     return article

@@ -24,6 +24,7 @@ import asyncio
 import uvicorn
 
 import db
+import scraper
 import seed_sources
 import discord_bot
 import web
@@ -56,6 +57,9 @@ async def main():
     n = seed_sources.seed()
     if n:
         logger.info(f"Seeded {n} default source(s) on first run.")
+    n = scraper.backfill_content_tags()
+    if n:
+        logger.info(f"Backfilled content_tag for {n} article(s) from before that feature existed.")
 
     logger.info(f"Web app: http://{HOST}:{PORT}")
     await asyncio.gather(run_web(), run_discord())

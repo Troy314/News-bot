@@ -28,7 +28,10 @@ CREATE TABLE IF NOT EXISTS sources (
     image_selector TEXT,
     user_agent TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_checked_at TEXT,
+    last_status TEXT,
+    last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS articles (
@@ -39,7 +42,8 @@ CREATE TABLE IF NOT EXISTS articles (
     pub_date TEXT,
     image_url TEXT,
     first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-    notified INTEGER NOT NULL DEFAULT 0
+    notified INTEGER NOT NULL DEFAULT 0,
+    content_tag TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source_id);
 CREATE INDEX IF NOT EXISTS idx_articles_pub_date ON articles(pub_date);
@@ -83,10 +87,32 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+# (table, column, SQL type/default) -- columns added after a table's first
+# release. CREATE TABLE IF NOT EXISTS is a no-op on an already-existing
+# table, so new columns need an explicit ALTER TABLE migration every startup
+# (harmless once the column already exists -- checked against PRAGMA
+# table_info first).
+COLUMN_MIGRATIONS = [
+    ("sources", "last_checked_at", "TEXT"),
+    ("sources", "last_status", "TEXT"),
+    ("sources", "last_error", "TEXT"),
+    ("articles", "content_tag", "TEXT"),
+]
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    for table, column, col_type in COLUMN_MIGRATIONS:
+        existing_cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing_cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
 def init_db() -> None:
     conn = get_conn()
     try:
         conn.executescript(SCHEMA)
+        _ensure_columns(conn)
+        conn.commit()
         existing = {row["key"] for row in conn.execute("SELECT key FROM settings")}
         for key, value in DEFAULT_SETTINGS.items():
             if key not in existing:

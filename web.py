@@ -200,7 +200,15 @@ def list_articles(source: str | None = None, favorites_only: bool = False, folde
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY articles.pub_date DESC"
         rows = conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        results = [dict(r) for r in rows]
+        # Belt-and-suspenders: scraper.backfill_content_tags() covers this at
+        # startup, but a row could reach here NULL some other way (a restored
+        # backup, direct DB edits) -- this endpoint reads raw rows, not
+        # through Article, so it doesn't get Article.__init__'s fallback.
+        for a in results:
+            if not a["content_tag"]:
+                a["content_tag"] = scraper.classify_article(a["title"])
+        return results
     finally:
         conn.close()
 

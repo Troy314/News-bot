@@ -6,7 +6,7 @@ const state = {
   sources: [],
   folders: [],
   activeFolderId: null,
-  activeSourceFilter: new Set(),
+  feedViewMode: "grid",
 };
 
 function escapeHtml(s) {
@@ -79,18 +79,21 @@ function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
   const image = article.image_url
     ? `<div class="card-image"><img src="${escapeHtml(article.image_url)}" alt="" loading="lazy" onerror="this.parentElement.remove()"></div>`
     : "";
-  const isFav = article.folder_id !== undefined && article.folder_id !== null || article.is_favorite;
   const favBtn = showFavoriteToggle
     ? `<button class="fav-btn" data-id="${article.id}" title="Favorite">${article.is_favorite ? "★" : "☆"}</button>`
     : "";
+  const contentTag = article.content_tag
+    ? `<span class="content-tag">${escapeHtml(article.content_tag)}</span>`
+    : "";
   return `
-    <div class="card" data-source="${escapeHtml(article.source_name)}">
+    <div class="card" data-source="${escapeHtml(article.source_name)}" data-tag="${escapeHtml(article.content_tag || "")}">
       ${favBtn}
       ${image}
       <div class="card-body">
         <h3><a href="${escapeHtml(article.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(article.title)}</a></h3>
         <div class="card-meta">
           <span class="tag" style="--hue:${hue}">${escapeHtml(article.source_name)}</span>
+          ${contentTag}
           <span title="${escapeHtml(timeAgo(article.pub_date))}">${escapeHtml(fullDate(article.pub_date))}</span>
         </div>
       </div>
@@ -124,36 +127,102 @@ function renderChips(container, articles, onFilterChange) {
   return hues;
 }
 
+function dayLabel(pubDate) {
+  if (!pubDate) return "Unknown date";
+  const d = new Date(pubDate);
+  const now = new Date();
+  const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((startOf(now) - startOf(d)) / 86400000);
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  return d.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+}
+
+function renderTimelineRow(article, hues) {
+  const hue = hues[article.source_name] ?? 0;
+  const thumb = article.image_url
+    ? `<div class="timeline-thumb"><img src="${escapeHtml(article.image_url)}" alt="" loading="lazy" onerror="this.parentElement.remove()"></div>`
+    : "";
+  const contentTag = article.content_tag ? `<span class="content-tag">${escapeHtml(article.content_tag)}</span>` : "";
+  return `
+    <div class="timeline-row" data-source="${escapeHtml(article.source_name)}">
+      <span class="timeline-dot" style="--hue:${hue}"></span>
+      ${thumb}
+      <div class="timeline-content">
+        <h4><a href="${escapeHtml(article.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(article.title)}</a></h4>
+        <div class="timeline-meta">
+          <span class="tag" style="--hue:${hue}">${escapeHtml(article.source_name)}</span>
+          ${contentTag}
+          <span class="timeline-time" title="${escapeHtml(fullDate(article.pub_date))}">${escapeHtml(timeAgo(article.pub_date))}</span>
+        </div>
+      </div>
+      <button class="timeline-fav-btn fav-btn" data-id="${article.id}" title="Favorite">${article.is_favorite ? "★" : "☆"}</button>
+    </div>`;
+}
+
+function renderTimeline(articles, hues) {
+  const groups = new Map();
+  articles.forEach((a) => {
+    const key = a.pub_date ? new Date(a.pub_date).toDateString() : "unknown";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(a);
+  });
+
+  let html = "";
+  for (const [, group] of groups) {
+    html += `<div class="timeline-day">
+      <div class="timeline-day-label">${escapeHtml(dayLabel(group[0].pub_date))}</div>
+      ${group.map((a) => renderTimelineRow(a, hues)).join("")}
+    </div>`;
+  }
+  return html;
+}
+
+function applyFeedFilter(active) {
+  document.querySelectorAll("#feed-grid .card, #feed-timeline .timeline-row").forEach((el) => {
+    el.style.display = active.size === 0 || active.has(el.dataset.source) ? "" : "none";
+  });
+}
+
+document.getElementById("view-grid-btn").addEventListener("click", () => setFeedView("grid"));
+document.getElementById("view-timeline-btn").addEventListener("click", () => setFeedView("timeline"));
+
+function setFeedView(mode) {
+  state.feedViewMode = mode;
+  document.getElementById("view-grid-btn").classList.toggle("active", mode === "grid");
+  document.getElementById("view-timeline-btn").classList.toggle("active", mode === "timeline");
+  document.getElementById("feed-grid").style.display = mode === "grid" ? "" : "none";
+  document.getElementById("feed-timeline").style.display = mode === "timeline" ? "" : "none";
+}
+
 async function loadFeed() {
   const articlesRaw = await api("/api/articles");
-  const favIds = new Set(articlesRaw.filter((a) => a.folder_id !== null && a.folder_id !== undefined).map((a) => a.id));
-  // folder_id can legitimately be null for a favorite with no folder, so also check via a dedicated favorites fetch
+  // folder_id can legitimately be null for a favorite with no folder, so
+  // favorite status needs its own dedicated fetch, not a folder_id check.
   const favRows = await api("/api/articles?favorites_only=true");
   const favSet = new Set(favRows.map((a) => a.id));
   articlesRaw.forEach((a) => { a.is_favorite = favSet.has(a.id); });
 
   state.articles = articlesRaw;
   const grid = document.getElementById("feed-grid");
+  const timeline = document.getElementById("feed-timeline");
   const empty = document.getElementById("feed-empty");
   const chipsEl = document.getElementById("feed-chips");
 
   if (articlesRaw.length === 0) {
     grid.innerHTML = "";
+    timeline.innerHTML = "";
     empty.style.display = "block";
     chipsEl.innerHTML = "";
     return;
   }
   empty.style.display = "none";
 
-  const hues = renderChips(chipsEl, articlesRaw, (active) => {
-    const cards = grid.querySelectorAll(".card");
-    cards.forEach((card) => {
-      card.style.display = active.size === 0 || active.has(card.dataset.source) ? "" : "none";
-    });
-  });
+  const hues = renderChips(chipsEl, articlesRaw, applyFeedFilter);
 
   grid.innerHTML = articlesRaw.map((a) => renderCard(a, hues)).join("");
-  grid.querySelectorAll(".fav-btn").forEach((btn) => {
+  timeline.innerHTML = renderTimeline(articlesRaw, hues);
+  document.querySelectorAll("#feed-grid .fav-btn, #feed-timeline .fav-btn").forEach((btn) => {
     btn.addEventListener("click", () => toggleFavorite(btn));
   });
 }
@@ -268,11 +337,27 @@ document.getElementById("new-folder-btn").addEventListener("click", async () => 
 // Sources
 // -------------------------------------------------------------------------
 
+const HEALTH_BADGE = {
+  ok: { icon: "🟢", label: "Working" },
+  empty: { icon: "🟡", label: "Fetched OK, but found 0 articles — selectors may need updating" },
+  error: { icon: "🔴", label: "Failing" },
+};
+
+function renderHealthBadge(s) {
+  if (!s.last_checked_at) {
+    return `<span class="health-badge" title="Not checked yet">⚪ Not checked yet</span>`;
+  }
+  const info = HEALTH_BADGE[s.last_status] || HEALTH_BADGE.ok;
+  const tooltip = s.last_error ? `${info.label}: ${s.last_error}` : info.label;
+  return `<span class="health-badge" title="${escapeHtml(tooltip)}">${info.icon} ${escapeHtml(timeAgo(s.last_checked_at))}</span>`;
+}
+
 function renderSourceRow(s) {
   return `
     <div class="source-row ${s.enabled ? "" : "disabled"}">
       <span class="name">${escapeHtml(s.name)}</span>
       <span class="meta">${s.kind}${s.user_agent ? " · custom UA" : ""}</span>
+      ${renderHealthBadge(s)}
       <button class="toggle-btn" data-id="${s.id}" data-enabled="${s.enabled}">${s.enabled ? "Disable" : "Enable"}</button>
       <button class="danger delete-btn" data-id="${s.id}">Delete</button>
     </div>`;

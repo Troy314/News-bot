@@ -70,7 +70,17 @@ would only start half of it.
   Settings tab (`PUT /api/settings`) *without* touching `.env` again. Only
   non-secret, occasionally-changed values live here (digest time/timezone,
   Discord channel id) — `DISCORD_TOKEN` and `SMTP_*` stay in `.env` only,
-  never exposed through the API, even though this is a local-only app.
+  never exposed through the API, even though this is a local-only app. Also
+  holds `last_digest_run_date` (see "Missed-run catch-up" below) — an
+  internal bookkeeping value, not something the Settings tab exposes.
+- `sources.last_checked_at` / `last_status` / `last_error` and
+  `articles.content_tag` were added after the initial DB-backed rewrite —
+  see `COLUMN_MIGRATIONS` in `db.py` for the `ALTER TABLE` migration
+  pattern (`CREATE TABLE IF NOT EXISTS` is a no-op on an already-existing
+  table, so a genuinely new column needs this every time, checked against
+  `PRAGMA table_info` first so it's a harmless no-op once applied). Follow
+  this same pattern for the *next* new column — don't just edit `SCHEMA`
+  and assume existing installs pick it up.
 
 ## The scraping engine (`scraper.py`)
 
@@ -110,6 +120,57 @@ Two extraction modes, same as the original script:
 `MAX_ARTICLES_PER_FETCH` (10) caps how many articles are pulled per source
 per scrape — this bounds both scrape time and DB growth per run, not a
 "only 10 exist" assumption.
+
+## Source health tracking
+
+`scrape_source_safe()` (not `scrape_source()` — see below) never raises,
+and always records `last_checked_at`/`last_status`/`last_error` on the
+source row as a side effect, regardless of outcome. Three statuses, not
+two, because "fetched fine but found nothing" and "fetch/parse genuinely
+failed" are different problems with different fixes:
+- `"ok"` — fetched, found articles.
+- `"empty"` — fetched successfully, zero articles extracted. For a `css`
+  source this usually means the site changed its HTML and the selectors
+  need updating; for `rss` it's unusual (feeds almost always have at least
+  one item) but not inherently broken.
+- `"error"` — the fetch or parse itself failed (network error, non-200,
+  totally malformed response). Raised internally as `scraper.ScrapeError`
+  from `scrape_rss`/`scrape_css`, caught here so one broken source can't
+  take down `scrape_all_sources()`'s loop over the rest.
+
+`scrape_source()` (the plain dispatcher) *does* raise `ScrapeError` on
+fetch failure — it's the low-level building block. Every real call site
+(`scrape_all_sources()`, `discord_bot.py`'s `!news` command) goes through
+`scrape_source_safe()` instead, so both the daily job *and* a manual
+Discord check keep the Sources tab's health indicator current. If you add
+a third call site that scrapes a single source, use `scrape_source_safe()`
+too, not the raising version — otherwise that source's health silently
+stops updating from that path.
+
+## Content tagging
+
+`scraper.classify_article(title)` — ordered, first-match-wins keyword
+regexes (`CONTENT_TAG_RULES`) sorted into `Obituary`/`Award`/`Personnel`/
+`Discovery`/`Event`/`Jobs`/`Funding`/`Outreach`, defaulting to `News`.
+Deliberately **title-only, English-only, no ML/API call** — title is the
+only text reliably available across every source (CSS-scraped sources have
+no body text at all, and RSS descriptions vary too much in quality/length
+to rely on), and several primary sources (CERN's `/fr/feed/`, IN2P3, CNRS
+News) publish in French, which these regexes don't attempt to cover — see
+"Suggested next steps" if that's worth fixing later.
+
+`Article.__init__` computes this automatically (`content_tag or
+classify_article(title)`) whenever `content_tag` isn't passed in, so any
+freshly-scraped article always has one. Rows that predate this feature
+have `content_tag IS NULL` in the DB; `scraper.backfill_content_tags()`
+(called once at startup by `main.py`) fills those in permanently. **Read
+paths that bypass `Article`/`get_articles()` won't get the constructor's
+fallback** — `web.py`'s `/api/articles` learned this the hard way (it runs
+its own SQL for the favorites/folder `LEFT JOIN`, so every article showed
+`content_tag: null` until a matching defensive fallback was added there
+too). If you add another raw-SQL read path over `articles`, add the same
+`classify_article()` fallback, or route it through `get_articles()`
+instead.
 
 ## Adding a source
 
@@ -156,15 +217,43 @@ Two-tier, matching the web UI's "Add website / newsletter" form:
 2. If nothing new: log and stop. No Discord post, no email — "new news"
    means don't notify when there isn't any, matching the original bot's
    steady-state behavior.
-3. If there's something new: `digest.render_digest_html()` on just those
-   articles (not the whole DB) → posted to Discord as a file with
-   `@everyone` (`AllowedMentions(everyone=True)` — **also needs the bot to
-   actually have the "Mention Everyone" server permission**, or the ping
-   silently doesn't notify anyone even though the message sends) → same
-   HTML as the body of an email to every `newsletter_subscribers` row.
+3. If there's something new: `discord_bot.notify_discord()` posts one
+   `@everyone` heads-up message (`AllowedMentions(everyone=True)` — **also
+   needs the bot to actually have the "Mention Everyone" server
+   permission**, or the ping silently doesn't notify anyone even though the
+   message sends), then one individual embed per new article (oldest
+   first, so the channel reads top-to-bottom chronologically) — **not** a
+   digest file; that was the first design and was explicitly changed
+   (individual messages read better in a chat channel, and `!digest`
+   already covers "I want the downloadable file" separately). Same new
+   articles also become the body of one `digest.render_digest_html()` email
+   to every `newsletter_subscribers` row — the file-shaped digest is still
+   the right shape for email, just not for Discord.
 4. `scraper.mark_notified(new_ids)` — only *after* both notify attempts,
    so a crash before this point means the next run will just include
    those articles again rather than silently losing them.
+5. `scheduler._mark_ran_today()` — records today's date (in the digest
+   timezone) in `settings.last_digest_run_date`, regardless of whether
+   anything was new. This is what "Missed-run catch-up" below checks, and
+   is deliberately updated even on a nothing-new run — "checked today,
+   found nothing" and "haven't checked today yet" need to read differently
+   to that logic, or a genuinely quiet news day would look identical to a
+   missed run and trigger a same-day re-check for no reason.
+
+## Missed-run catch-up
+
+If the app wasn't running at the scheduled time (PC was off, crashed,
+etc), `tasks.loop(time=...)` just silently waits for tomorrow's
+occurrence — it does **not** fire immediately on a late start. That's the
+literal, if slightly counterintuitive, behavior of a time-of-day loop, and
+it means "missed" news could otherwise go unsent for a full extra day.
+`scheduler.catch_up_if_missed()` (called once from `discord_bot.py`'s
+`on_ready`, right after `scheduler.start()`) covers this: if today's
+scheduled time has already passed and `last_digest_run_date` isn't today,
+it runs `run_daily_job()` immediately instead of waiting. Naturally
+idempotent if `on_ready` ever fires more than once in a session (discord.py
+reconnects don't normally re-trigger it, but nothing here assumes that) —
+the date check alone prevents a second catch-up the same day.
 
 The web UI's Feed tab is a different, wider view — `GET /api/articles`
 with no filter returns *everything* in the DB, not just unnotified
@@ -196,14 +285,25 @@ upfront.
   alphabetically-stable hue rotation — same `source_hues()` logic as
   `digest.py`, kept in sync manually since this is plain JS with no shared
   module system with the Python renderer), a ☆/★ favorite toggle per
-  card, and "Check for news now" (`POST /api/run-now` — this literally
-  calls `scheduler.run_daily_job()`, same code path as the daily
-  schedule and `!forcedigest`, so testing from the UI behaves identically
-  to the real automatic run).
+  card, a Grid/Timeline view toggle (see below), and "Check for news now"
+  (`POST /api/run-now` — this literally calls `scheduler.run_daily_job()`,
+  same code path as the daily schedule and `!forcedigest`, so testing from
+  the UI behaves identically to the real automatic run, individual Discord
+  embeds included).
+  - **Timeline view** (`renderTimeline()`/`renderTimelineRow()`) groups
+    articles by calendar day ("Today"/"Yesterday"/full date — `dayLabel()`)
+    as a vertical list with a connecting line and a per-source-colored dot,
+    a small thumbnail, and the same tag/content-tag/date meta row as a grid
+    card. Grid and Timeline share the *same* underlying article list, hue
+    map, and source-filter chips (`applyFeedFilter()` toggles `.card` and
+    `.timeline-row` elements by the same `data-source` attribute) — a
+    filter or favorite action doesn't need to know which view is currently
+    visible.
 - **Favorites**: folder sidebar + grid, a per-article folder `<select>` to
   move it between folders without unfavoriting first.
-- **Sources**: enable/disable + delete per source, and the add-source flow
-  described above.
+- **Sources**: enable/disable + delete per source, a health badge per
+  source (🟢/🟡/🔴/⚪, hover for the actual `last_error` — see "Source
+  health tracking" above), and the add-source flow described above.
 - **Settings**: digest schedule (see the restart caveat above), Discord
   channel id, and newsletter subscriber management.
 
@@ -214,16 +314,19 @@ sink — explicit choice over simplifying to notify-only once the web UI
 existed, since Discord access (e.g. from a phone) is sometimes more
 convenient than the local web app.
 
-- `!news <site>` — live-scrapes one named source (bypassing the DB's
-  cached articles) and posts each as an embed; also persists results, so
-  the DB stays in sync with any manual check.
+- `!news <site>` — live-scrapes one named source via `scrape_source_safe()`
+  (bypassing the DB's cached articles, but still updating that source's
+  health) and posts each as an embed; also persists results, so the DB
+  stays in sync with any manual check.
 - `!sites` — lists configured sources.
 - `!digest` — posts the full current digest (everything in the DB) as a
-  file, on demand.
+  downloadable **file**, on demand — the one place in Discord that still
+  uses the file-shaped digest; see "Notification flow" above for why the
+  automatic daily post doesn't.
 - `!forcedigest` — runs the *exact* daily job (`scheduler.run_daily_job()`)
-  immediately, same @everyone-if-new-articles behavior as the real 8am
-  run. Useful for testing without waiting for the schedule or faking the
-  clock.
+  immediately: individual embeds if there's anything new, same as the real
+  8am run (or a missed-run catch-up). Useful for testing without waiting
+  for the schedule or faking the clock.
 
 `discord_bot.py` and `scheduler.py` import each other; the cycle is broken
 with a **lazy import inside functions** (`on_ready`, `force_digest_command`)
@@ -250,14 +353,13 @@ the old script's `--digest`-then-exit autostart entry (retired along with
 that file's `Exec=` line needs updating by hand — it's outside the repo,
 not tracked by git.
 
-**Railway**: `railpack.json`'s `startCommand` still points at the retired
-`news_bot.py` — this needs a decision, not an assumption, before the next
-Railway deploy: (a) point it at `main.py` too, which would need `HOST=0.0.0.0`
-and Railway's `$PORT` wired in, plus a real answer for where SQLite persists
-across redeploys (Railway's filesystem is ephemeral without an attached
-volume), or (b) retire the Railway deployment now that "local server" is
-the explicit design, since a local SQLite-backed app with autostart doesn't
-obviously need a second, cloud-hosted copy. Don't silently pick one.
+**Railway**: retired. `railpack.json` is deleted from this repo — the app
+is local-first by design (SQLite + PC autostart), and a second cloud-hosted
+copy would need its own answer for SQLite persisting across redeploys
+(ephemeral filesystem without an attached volume) for no real benefit.
+**The actual Railway project still needs deleting/disconnecting by hand
+via Railway's dashboard** — there's no Railway CLI in this environment, so
+removing the repo-side config is as far as this could go automatically.
 
 ## Retired
 
