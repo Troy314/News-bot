@@ -308,12 +308,24 @@ FRENCH_DATE_RE = re.compile(
 )
 
 
+def _french_month_number(name: str) -> int | None:
+    # Every French full month name starts with its standard abbreviation
+    # (janvier->janv, février->févr, juillet->juil, ...), so one lookup
+    # table covers both "3 juillet 2026" (full) and "24 juil. 2026" (abbr)
+    # -- no need to enumerate full names separately.
+    name = name.lower().rstrip(".")
+    for abbrev, num in FRENCH_MONTHS.items():
+        if name.startswith(abbrev):
+            return num
+    return None
+
+
 def parse_french_date(text: str) -> datetime | None:
     match = FRENCH_DATE_RE.search(text)
     if not match:
         return None
     day, month_name, year, hour, minute, second = match.groups()
-    month = FRENCH_MONTHS.get(month_name.lower().rstrip("."))
+    month = _french_month_number(month_name)
     if not month:
         return None
     try:

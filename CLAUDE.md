@@ -344,6 +344,27 @@ IN2P3, and CNRS News are also French-language sources — if a new source's
 `date_selector` text isn't parsing, check whether it's a French date before
 assuming the selector itself is wrong.
 
+`_french_month_number()` matches **both** abbreviated ("juil.") and full
+("juillet") month names against the same `FRENCH_MONTHS` lookup table, via
+a `startswith()` check rather than two separate tables — every French full
+month name happens to start with its own standard abbreviation, so this
+covers both forms for free. Caught for real: LPC's dates
+(`date_selector: "p div"`) are "3 juillet 2026" (full name, no time),
+unlike CPPM's abbreviated-with-time format — the initial abbreviation-only
+lookup silently failed on LPC's dates (`_french_month_number` returned
+`None` for `"juillet"`) until this was generalized. If a future French
+source's dates still don't parse, check for a genuinely different format
+(different punctuation, day-of-week prefix, etc) before assuming the month
+lookup needs yet another entry — the lookup itself is already
+form-agnostic.
+
+**LPC** (`clrwww.in2p3.fr`) is a simpler worked example than CPPM — real
+per-article `href`s (no anchor-id fallback needed), `article_selector:
+"li.item.actualites"`, `title_selector`/`link_selector` both just `"a"`
+(the whole card is one anchor), `date_selector: "p div"` (a `<div>` mixing
+a Font Awesome calendar icon with the date text — `get_text()` only picks
+up the text, the icon has none of its own).
+
 ## Social media sources
 
 `category = 'social'` was added after `website`/`newsletter` already
