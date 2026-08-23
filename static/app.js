@@ -6,12 +6,30 @@ const state = {
   sources: [],
   folders: [],
   activeFolderId: null,
+  jobs: [],
+  jobTags: [],
 };
 
 function escapeHtml(s) {
   const div = document.createElement("div");
   div.textContent = s ?? "";
   return div.innerHTML;
+}
+
+// A CSS-selector text input paired with a "🎯 Pick" button that opens the
+// live-preview picker (see the "Selector picker" section below) -- shared
+// by both the Add-source and Edit-source forms, whose fields are identical
+// except for the "sel-"/"edit-sel-" id prefix.
+function selectorFieldHtml(formType, key, label, value = "") {
+  const id = (formType === "edit" ? "edit-sel-" : "sel-") + key;
+  return `
+    <div class="field">
+      <label>${label}</label>
+      <div class="selector-field-row">
+        <input type="text" id="${id}" value="${escapeHtml(value)}" style="width:100%">
+        <button type="button" class="pick-btn" data-form="${formType}" data-field="${key}" title="Pick this element on a live preview of the page">🎯 Pick</button>
+      </div>
+    </div>`;
 }
 
 async function api(path, options = {}) {
@@ -64,6 +82,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.classList.add("active");
     document.getElementById(`view-${btn.dataset.view}`).classList.add("active");
     if (btn.dataset.view === "favorites") loadFavorites();
+    if (btn.dataset.view === "jobs") loadJobs();
     if (btn.dataset.view === "sources") loadSources();
     if (btn.dataset.view === "settings") loadSettings();
   });
@@ -73,7 +92,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
 // Feed
 // -------------------------------------------------------------------------
 
-function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
+function renderCard(article, hues, { showFavoriteToggle = true, showContentTag = true, allowDeadlineEdit = false, allowArchive = false } = {}) {
   const hue = hues[article.source_name] ?? 0;
   const image = article.image_url
     ? `<div class="card-image"><img src="${escapeHtml(article.image_url)}" alt="" loading="lazy" onerror="this.parentElement.remove()"></div>`
@@ -81,11 +100,40 @@ function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
   const favBtn = showFavoriteToggle
     ? `<button class="fav-btn" data-id="${article.id}" title="Favorite">${article.is_favorite ? "★" : "☆"}</button>`
     : "";
-  const contentTag = article.content_tag
+  // content_tag is a physics-topic classification (neutrino, muon, ...) --
+  // meaningless for a job/thesis-offer listing, so the Jobs tab suppresses
+  // it via showContentTag:false rather than showing "General Physics" on
+  // every card.
+  const contentTag = article.content_tag && showContentTag
     ? `<span class="content-tag">${escapeHtml(article.content_tag)}</span>`
     : "";
+  // job_tag (Fellowship/PhD/Internship/...) is only ever set on category
+  // "job" articles (see scraper.classify_job) -- null/undefined everywhere
+  // else, so this renders nothing extra on ordinary news cards.
+  const jobTag = article.job_tag
+    ? `<span class="job-tag">${escapeHtml(article.job_tag)}</span>`
+    : "";
+  const deadline = article.deadline
+    ? `<span class="deadline-badge" data-passed="${new Date(article.deadline).getTime() < Date.now()}">Deadline: ${escapeHtml(fullDate(article.deadline))}</span>`
+    : "";
+  // Most job sources don't expose a deadline to scrape at all (see
+  // CLAUDE.md's "Job deadlines") -- this lets the user set/correct/clear
+  // one by hand instead of it just staying permanently blank. Only shown
+  // where the caller opts in (Jobs tab), not on ordinary Feed cards.
+  const deadlineEditBtn = allowDeadlineEdit
+    ? `<button class="deadline-edit-btn" data-id="${article.id}" data-deadline="${escapeHtml(article.deadline ? isoDay(new Date(article.deadline)) : "")}" title="${article.deadline ? "Edit deadline" : "Set application deadline"}">${article.deadline ? "✎" : "+ Deadline"}</button>`
+    : "";
+  // Hides the offer from the Jobs tab (list + calendar) without deleting
+  // it -- confirmed with a native confirm() before the API call actually
+  // fires, same lightweight pattern the Sources tab's delete button
+  // already uses in this app (not the instant-delete-with-undo toast flow
+  // Collection-style apps use elsewhere, since there's no "undo" here --
+  // just a reversible unarchive via the API if ever needed).
+  const archiveBtn = allowArchive
+    ? `<button class="archive-btn" data-id="${article.id}" title="Archive this offer">🗄 Archive</button>`
+    : "";
   return `
-    <div class="card" data-source="${escapeHtml(article.source_name)}" data-tag="${escapeHtml(article.content_tag || "")}">
+    <div class="card" data-source="${escapeHtml(article.source_name)}" data-tag="${escapeHtml(article.content_tag || "")}" data-job-tag="${escapeHtml(article.job_tag || "Untagged")}">
       ${favBtn}
       ${image}
       <div class="card-body">
@@ -93,7 +141,11 @@ function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
         <div class="card-meta">
           <span class="tag" style="--hue:${hue}">${escapeHtml(article.source_name)}</span>
           ${contentTag}
+          ${jobTag}
           <span title="${escapeHtml(timeAgo(article.pub_date))}">${escapeHtml(fullDate(article.pub_date))}</span>
+          ${deadline}
+          ${deadlineEditBtn}
+          ${archiveBtn}
         </div>
       </div>
     </div>`;
@@ -105,7 +157,7 @@ function renderCard(article, hues, { showFavoriteToggle = true } = {}) {
 const activeSources = new Set();
 const activeTags = new Set();
 
-function wireChips(container, activeSet, dataKey) {
+function wireChips(container, activeSet, dataKey, onChange) {
   container.querySelectorAll(".chip").forEach((chip) => {
     chip.addEventListener("click", () => {
       const val = chip.dataset[dataKey];
@@ -117,7 +169,7 @@ function wireChips(container, activeSet, dataKey) {
         activeSet.has(val) ? activeSet.delete(val) : activeSet.add(val);
       }
       container.querySelector(".chip-all").classList.toggle("active", activeSet.size === 0);
-      applyFeedFilter();
+      onChange();
     });
   });
 }
@@ -128,7 +180,7 @@ function wireChips(container, activeSet, dataKey) {
 // .chip-group-label's flex-basis:100%. Falls back to a plain unclustered
 // list when no source has a group set, so the common "haven't used groups
 // yet" case doesn't show an empty/pointless "Ungrouped" label.
-function renderSourceChips(container, articles) {
+function renderSourceChips(container, articles, activeSet, onChange) {
   const counts = {};
   const groupOf = {};
   articles.forEach((a) => {
@@ -163,17 +215,32 @@ function renderSourceChips(container, articles) {
   }
 
   container.innerHTML = html;
-  wireChips(container, activeSources, "source");
+  wireChips(container, activeSet, "source", onChange);
   return hues;
 }
 
-function renderTagChips(container, articles) {
+// Generalized so Jobs' job_tag chip row (Fellowship/PhD/Internship/...)
+// reuses this instead of a near-duplicate function -- field picks which
+// article property to count/group by, emptyLabel buckets articles with no
+// value there (job_tag is genuinely absent for most postings, unlike
+// content_tag which always has at least "General Physics").
+function renderTagChips(container, articles, {
+  field = "content_tag", activeSet = activeTags, onChange = applyFeedFilter,
+  allLabel = "All topics", emptyLabel = null,
+} = {}) {
   const counts = {};
-  articles.forEach((a) => { counts[a.content_tag] = (counts[a.content_tag] || 0) + 1; });
+  articles.forEach((a) => {
+    const val = a[field] || emptyLabel;
+    if (val) counts[val] = (counts[val] || 0) + 1;
+  });
   const names = Object.keys(counts).sort();
-  container.innerHTML = `<button class="chip chip-all active" data-tag="__all__">All topics</button>` +
-    names.map((name) => `<button class="chip" data-tag="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`).join("");
-  wireChips(container, activeTags, "tag");
+  // Reflects activeSet's *current* membership at render time, not just an
+  // always-starts-empty assumption -- needed now that Jobs pre-populates
+  // activeJobTags from a persisted hidden-tags set before this ever runs
+  // (see loadHiddenJobTags), so those chips need to render already-toggled.
+  container.innerHTML = `<button class="chip chip-all${activeSet.size === 0 ? " active" : ""}" data-tag="__all__">${allLabel}</button>` +
+    names.map((name) => `<button class="chip${activeSet.has(name) ? " active" : ""}" data-tag="${escapeHtml(name)}">${escapeHtml(name)} <span style="opacity:.65">${counts[name]}</span></button>`).join("");
+  wireChips(container, activeSet, "tag", onChange);
 }
 
 function dayLabel(pubDate) {
@@ -199,8 +266,8 @@ function groupByDay(articles) {
 
 const OPEN_BY_DEFAULT_MS = 30 * 24 * 60 * 60 * 1000; // keep the last month's days expanded
 
-function renderDayGroup(articles, hues, isOpen) {
-  const cards = articles.map((a) => renderCard(a, hues)).join("");
+function renderDayGroup(articles, hues, isOpen, cardOptions = {}) {
+  const cards = articles.map((a) => renderCard(a, hues, cardOptions)).join("");
   return `
     <details class="day-group"${isOpen ? " open" : ""}>
       <summary>
@@ -212,13 +279,29 @@ function renderDayGroup(articles, hues, isOpen) {
     </details>`;
 }
 
-function applyFeedFilter() {
+// Shared by Feed (source + content-topic chips, tagKey "tag") and Jobs
+// (source + job-tag chips, tagKey "jobTag" -- the dataset-API camelCase
+// form of the card's data-job-tag attribute). activeTagsSet may be null
+// (tagOk unconditionally true) for a view with no tag filter at all.
+// tagMode "include" (Feed's content-topic chips): empty set = show all,
+// non-empty = show *only* the active tags. tagMode "exclude" (Jobs' tag
+// chips, which default to hiding a few noisy tags -- see loadHiddenJobTags
+// below): empty set = show all too (the two modes agree on "nothing
+// selected"), but a non-empty set *hides* those tags instead of narrowing
+// to them -- the opposite polarity, same deliberate asymmetry this app's
+// design lineage already uses for category vs difficulty filters elsewhere.
+function applyDayFilter(containerId, activeSourcesSet, activeTagsSet, noMatchElId, tagKey = "tag", tagMode = "include") {
   let anyVisible = false;
-  document.querySelectorAll(".day-group").forEach((dayGroup) => {
+  document.querySelectorAll(`#${containerId} .day-group`).forEach((dayGroup) => {
     let dayGroupVisible = false;
     dayGroup.querySelectorAll(".card").forEach((card) => {
-      const sourceOk = activeSources.size === 0 || activeSources.has(card.dataset.source);
-      const tagOk = activeTags.size === 0 || activeTags.has(card.dataset.tag);
+      const sourceOk = activeSourcesSet.size === 0 || activeSourcesSet.has(card.dataset.source);
+      let tagOk = true;
+      if (activeTagsSet) {
+        tagOk = tagMode === "exclude"
+          ? !activeTagsSet.has(card.dataset[tagKey])
+          : (activeTagsSet.size === 0 || activeTagsSet.has(card.dataset[tagKey]));
+      }
       const show = sourceOk && tagOk;
       card.classList.toggle("hidden", !show);
       if (show) dayGroupVisible = true;
@@ -226,14 +309,21 @@ function applyFeedFilter() {
     dayGroup.style.display = dayGroupVisible ? "" : "none";
     if (dayGroupVisible) anyVisible = true;
   });
-  document.getElementById("feed-no-match").style.display = anyVisible ? "none" : "block";
+  document.getElementById(noMatchElId).style.display = anyVisible ? "none" : "block";
+}
+
+function applyFeedFilter() {
+  applyDayFilter("feed-days", activeSources, activeTags, "feed-no-match");
 }
 
 async function loadFeed() {
-  const articlesRaw = await api("/api/articles");
+  // Job/thesis-offer sources (category "job") have their own tab (Jobs) --
+  // excluded here so they don't also show up mixed into the physics-news
+  // feed, same category-scoping Jobs itself uses in reverse (category=job).
+  const articlesRaw = await api("/api/articles?exclude_category=job");
   // folder_id can legitimately be null for a favorite with no folder, so
   // favorite status needs its own dedicated fetch, not a folder_id check.
-  const favRows = await api("/api/articles?favorites_only=true");
+  const favRows = await api("/api/articles?exclude_category=job&favorites_only=true");
   const favSet = new Set(favRows.map((a) => a.id));
   articlesRaw.forEach((a) => { a.is_favorite = favSet.has(a.id); });
 
@@ -257,7 +347,7 @@ async function loadFeed() {
   }
   empty.style.display = "none";
 
-  const hues = renderSourceChips(chipsEl, articlesRaw);
+  const hues = renderSourceChips(chipsEl, articlesRaw, activeSources, applyFeedFilter);
   renderTagChips(tagChipsEl, articlesRaw);
 
   const groups = groupByDay(articlesRaw);
@@ -297,6 +387,321 @@ document.getElementById("run-now-btn").addEventListener("click", async () => {
   } catch (e) {
     status.textContent = `Error: ${e.message}`;
   }
+});
+
+// -------------------------------------------------------------------------
+// Jobs (job/thesis-offer listing sources -- category "job", scraped by the
+// exact same scraper.py engine as news sources, just surfaced on their own
+// tab instead of mixed into Feed. "Check for jobs now" hits the same
+// /api/run-now as Feed -- it scrapes every enabled source regardless of
+// category in one pass, there's no separate job-only scrape endpoint.)
+// -------------------------------------------------------------------------
+
+const activeJobSources = new Set();
+// activeJobTags is the *hidden*-tags set here (see applyDayFilter's
+// tagMode "exclude"), not an inclusion filter -- persisted to localStorage
+// so a tag hidden once stays hidden across reloads, with a starting
+// default (Fellowship/Internship/Physicist/Post-Doc/Professorship hidden,
+// PhD/Outreach/Untagged/anything else shown) requested explicitly rather
+// than defaulting to "show everything."
+const activeJobTags = new Set();
+let jobHues = {};
+
+const JOB_TAG_HIDE_KEY = "newsbot-hidden-job-tags";
+const JOB_TAG_HIDE_DEFAULT = ["Fellowship", "Internship", "Physicist", "Post-Doc", "Professorship"];
+
+function loadHiddenJobTags() {
+  const stored = localStorage.getItem(JOB_TAG_HIDE_KEY);
+  if (stored === null) return new Set(JOB_TAG_HIDE_DEFAULT);
+  try {
+    return new Set(JSON.parse(stored));
+  } catch (e) {
+    return new Set(JOB_TAG_HIDE_DEFAULT);
+  }
+}
+
+function saveHiddenJobTags() {
+  localStorage.setItem(JOB_TAG_HIDE_KEY, JSON.stringify([...activeJobTags]));
+}
+
+function applyJobFilter() {
+  saveHiddenJobTags();
+  applyDayFilter("job-days", activeJobSources, activeJobTags, "job-no-match", "jobTag", "exclude");
+}
+
+async function loadJobs() {
+  const jobsRaw = await api("/api/articles?category=job");
+  const favRows = await api("/api/articles?category=job&favorites_only=true");
+  const favSet = new Set(favRows.map((a) => a.id));
+  jobsRaw.forEach((a) => { a.is_favorite = favSet.has(a.id); });
+  state.jobs = jobsRaw;
+
+  const daysEl = document.getElementById("job-days");
+  const empty = document.getElementById("job-empty");
+  const noMatch = document.getElementById("job-no-match");
+  const chipsEl = document.getElementById("job-chips");
+  const tagChipsEl = document.getElementById("job-tag-chips");
+
+  activeJobSources.clear();
+  activeJobTags.clear();
+  loadHiddenJobTags().forEach((t) => activeJobTags.add(t));
+  noMatch.style.display = "none";
+
+  if (jobsRaw.length === 0) {
+    daysEl.innerHTML = "";
+    empty.style.display = "block";
+    chipsEl.innerHTML = "";
+    tagChipsEl.innerHTML = "";
+    renderJobCalendar();
+    return;
+  }
+  empty.style.display = "none";
+
+  jobHues = renderSourceChips(chipsEl, jobsRaw, activeJobSources, applyJobFilter);
+  renderTagChips(tagChipsEl, jobsRaw, {
+    field: "job_tag", activeSet: activeJobTags, onChange: applyJobFilter,
+    allLabel: "All tags", emptyLabel: "Untagged",
+  });
+
+  const groups = groupByDay(jobsRaw);
+  const openSince = Date.now() - OPEN_BY_DEFAULT_MS;
+  let html = "";
+  for (const [key, group] of groups) {
+    // Most job-board pages have no reliable per-listing date at all (a
+    // search-results page just lists whatever's currently open) -- the
+    // undated "unknown" bucket defaults open so those aren't hidden behind
+    // an extra click, unlike Feed where "old" undated news would be rare.
+    const pubDate = group[0].pub_date;
+    const isRecent = pubDate ? new Date(pubDate).getTime() >= openSince : true;
+    html += renderDayGroup(group, jobHues, isRecent, { showContentTag: false, allowDeadlineEdit: true, allowArchive: true });
+  }
+  daysEl.innerHTML = html;
+
+  document.querySelectorAll("#job-days .fav-btn").forEach((btn) => {
+    btn.addEventListener("click", () => toggleFavorite(btn));
+  });
+
+  // Chips render pre-toggled from the persisted hidden-tags set above, but
+  // rendering the chips doesn't itself hide anything -- apply the filter
+  // once so the cards actually match what the chips show.
+  applyJobFilter();
+
+  renderJobCalendar();
+}
+
+document.getElementById("job-run-now-btn").addEventListener("click", async () => {
+  const status = document.getElementById("job-run-now-status");
+  status.textContent = "Checking every source... this can take a minute.";
+  try {
+    const result = await api("/api/run-now", { method: "POST" });
+    status.textContent = result.sent ? "New articles found and sent!" : "No new articles since the last check.";
+    await loadJobs();
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+  }
+});
+
+// -------------------------------------------------------------------------
+// Jobs: deadline calendar view -- a real Mon-Sun month grid (same shape as
+// a typical calendar app), separate from the day-grouped list above.
+// Purely a client-side regroup of state.jobs by each listing's `deadline`
+// field -- no new endpoint, mirrors how the list view itself is just a
+// different grouping of the same fetched data.
+// -------------------------------------------------------------------------
+
+document.querySelectorAll("#job-view-toggle .view-toggle-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#job-view-toggle .view-toggle-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    const isCalendar = btn.dataset.view === "calendar";
+    document.getElementById("job-list-view").style.display = isCalendar ? "none" : "block";
+    document.getElementById("job-calendar-view").style.display = isCalendar ? "block" : "none";
+  });
+});
+
+let jobCalMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+
+function buildMonthGrid(monthStart) {
+  // 42 cells (6 weeks), Monday-start, padded with the adjacent months' days
+  // -- same layout every month-grid calendar uses, so a 5-week month still
+  // renders a full rectangular grid instead of a ragged last row.
+  const firstOfMonth = new Date(monthStart);
+  const jsDay = firstOfMonth.getDay(); // 0=Sun..6=Sat
+  const mondayOffset = (jsDay + 6) % 7; // days to step back to reach Monday
+  const gridStart = new Date(firstOfMonth);
+  gridStart.setDate(gridStart.getDate() - mondayOffset);
+
+  const cells = [];
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(gridStart);
+    d.setDate(d.getDate() + i);
+    cells.push(d);
+  }
+  return cells;
+}
+
+function isoDay(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function renderJobCalendar() {
+  const grid = document.getElementById("job-cal-grid");
+  const label = document.getElementById("job-cal-label");
+  const emptyEl = document.getElementById("job-cal-empty");
+  if (!grid) return;
+
+  label.textContent = jobCalMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+  const withDeadline = state.jobs.filter((a) => a.deadline);
+  emptyEl.style.display = withDeadline.length === 0 ? "block" : "none";
+
+  const byDay = new Map();
+  withDeadline.forEach((a) => {
+    const key = isoDay(new Date(a.deadline));
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(a);
+  });
+
+  const today = isoDay(new Date());
+  const cells = buildMonthGrid(jobCalMonth);
+  const html = cells.map((d) => {
+    const key = isoDay(d);
+    const inMonth = d.getMonth() === jobCalMonth.getMonth();
+    const items = byDay.get(key) || [];
+    const pills = items.slice(0, 3).map((a) => {
+      const hue = jobHues[a.source_name] ?? 0;
+      return `<button class="cal__pill" data-hue="1" style="--hue:${hue}" data-id="${a.id}" title="${escapeHtml(a.title)}">${escapeHtml(a.title)}</button>`;
+    }).join("");
+    const overflow = items.length > 3 ? `<div class="cal__more" data-day="${key}">+${items.length - 3} more</div>` : "";
+    return `
+      <div class="cal__cell${inMonth ? "" : " cal__cell--out"}${key === today ? " cal__cell--today" : ""}" data-day="${key}">
+        <div class="cal__daynum">${d.getDate()}</div>
+        <div class="cal__pills">${pills}${overflow}</div>
+      </div>`;
+  }).join("");
+
+  grid.innerHTML = `
+    <div class="cal__weekday">Mon</div><div class="cal__weekday">Tue</div><div class="cal__weekday">Wed</div>
+    <div class="cal__weekday">Thu</div><div class="cal__weekday">Fri</div><div class="cal__weekday">Sat</div>
+    <div class="cal__weekday">Sun</div>
+    ${html}`;
+
+  grid.querySelectorAll(".cal__pill, .cal__more, .cal__cell").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const day = el.dataset.day || el.closest(".cal__cell")?.dataset.day;
+      if (day) openJobDayModal(day, byDay.get(day) || []);
+    });
+  });
+}
+
+function openJobDayModal(day, items) {
+  const existing = document.getElementById("job-day-modal");
+  if (existing) existing.remove();
+
+  const hues = jobHues;
+  const cards = items.map((a) => renderCard(a, hues, { showContentTag: false, allowDeadlineEdit: true, allowArchive: true })).join("");
+  const wrapper = document.createElement("div");
+  wrapper.id = "job-day-modal";
+  wrapper.className = "modal";
+  wrapper.innerHTML = `
+    <div class="modal__box">
+      <div class="modal__head">
+        <h3>Deadlines on ${escapeHtml(new Date(day).toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" }))}</h3>
+        <button class="modal__close">&times;</button>
+      </div>
+      <div class="grid">${cards || '<p class="hint">Nothing here.</p>'}</div>
+    </div>`;
+  document.body.appendChild(wrapper);
+  wrapper.addEventListener("click", (e) => { if (e.target === wrapper) wrapper.remove(); });
+  wrapper.querySelector(".modal__close").addEventListener("click", () => wrapper.remove());
+  wrapper.querySelectorAll(".fav-btn").forEach((btn) => {
+    btn.addEventListener("click", () => toggleFavorite(btn));
+  });
+}
+
+// Manual deadline editor -- most job sources don't expose a deadline to
+// scrape at all (see CLAUDE.md), so every job card's "✎"/"+ Deadline"
+// button (renderCard's allowDeadlineEdit option) opens this small modal
+// instead of leaving it permanently blank or requiring re-configuring the
+// source's selectors. Reuses the same .modal/.modal__box shell as
+// openJobDayModal, just with a plain date input instead of a card grid.
+function openDeadlineEditor(articleId, currentDeadline) {
+  document.getElementById("deadline-editor-modal")?.remove();
+
+  const wrapper = document.createElement("div");
+  wrapper.id = "deadline-editor-modal";
+  wrapper.className = "modal";
+  wrapper.innerHTML = `
+    <div class="modal__box" style="max-width: 360px;">
+      <div class="modal__head">
+        <h3>Application deadline</h3>
+        <button class="modal__close">&times;</button>
+      </div>
+      <div class="field">
+        <label>Deadline date</label>
+        <input type="date" id="deadline-editor-input" value="${escapeHtml(currentDeadline)}">
+      </div>
+      <div style="margin-top: 14px; display: flex; gap: 8px;">
+        <button id="deadline-editor-save" class="primary">Save</button>
+        <button id="deadline-editor-clear" class="danger">Clear</button>
+        <button id="deadline-editor-cancel">Cancel</button>
+      </div>
+      <div id="deadline-editor-error" class="error-text"></div>
+    </div>`;
+  document.body.appendChild(wrapper);
+
+  const close = () => wrapper.remove();
+  wrapper.addEventListener("click", (e) => { if (e.target === wrapper) close(); });
+  wrapper.querySelector(".modal__close").addEventListener("click", close);
+  wrapper.querySelector("#deadline-editor-cancel").addEventListener("click", close);
+
+  const save = async (deadline) => {
+    const errorEl = wrapper.querySelector("#deadline-editor-error");
+    try {
+      await api(`/api/articles/${articleId}/deadline`, { method: "PUT", body: JSON.stringify({ deadline }) });
+      close();
+      // The day-detail modal (if open) rendered its cards once from
+      // already-fetched data and won't pick up the change on its own --
+      // close it rather than leave it showing a stale deadline.
+      document.getElementById("job-day-modal")?.remove();
+      await loadJobs();
+    } catch (e) {
+      errorEl.textContent = e.message;
+    }
+  };
+
+  wrapper.querySelector("#deadline-editor-save").addEventListener("click", () => {
+    save(wrapper.querySelector("#deadline-editor-input").value || null);
+  });
+  wrapper.querySelector("#deadline-editor-clear").addEventListener("click", () => save(null));
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".deadline-edit-btn");
+  if (btn) openDeadlineEditor(Number(btn.dataset.id), btn.dataset.deadline || "");
+});
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".archive-btn");
+  if (!btn) return;
+  if (!confirm("Archive this job offer? It will be hidden from the Jobs list (this can be undone later via the API, but there's no UI for that yet).")) return;
+  await api(`/api/articles/${btn.dataset.id}/archive`, { method: "PUT" });
+  document.getElementById("job-day-modal")?.remove();
+  await loadJobs();
+});
+
+document.getElementById("job-cal-today")?.addEventListener("click", () => {
+  jobCalMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  renderJobCalendar();
+});
+document.getElementById("job-cal-prev")?.addEventListener("click", () => {
+  jobCalMonth = new Date(jobCalMonth.getFullYear(), jobCalMonth.getMonth() - 1, 1);
+  renderJobCalendar();
+});
+document.getElementById("job-cal-next")?.addEventListener("click", () => {
+  jobCalMonth = new Date(jobCalMonth.getFullYear(), jobCalMonth.getMonth() + 1, 1);
+  renderJobCalendar();
 });
 
 // -------------------------------------------------------------------------
@@ -424,13 +829,21 @@ function renderSourceRow(s) {
 
 async function loadSources() {
   state.sources = await api("/api/sources");
+  // Cached here (not fetched fresh in sourceFormHtml/editSourceFormHtml,
+  // which build their HTML synchronously) so the "Forced job tag" select
+  // in the Add/Edit forms has real options to offer without its own
+  // round-trip -- same pattern state.sources already uses for the
+  // existing-groups datalist.
+  state.jobTags = await api("/api/job-tags");
   const websites = state.sources.filter((s) => s.category === "website");
   const newsletters = state.sources.filter((s) => s.category === "newsletter");
   const social = state.sources.filter((s) => s.category === "social");
+  const jobs = state.sources.filter((s) => s.category === "job");
 
   document.getElementById("website-sources").innerHTML = websites.map(renderSourceRow).join("") || '<p class="hint">None yet.</p>';
   document.getElementById("newsletter-sources").innerHTML = newsletters.map(renderSourceRow).join("") || '<p class="hint">None yet.</p>';
   document.getElementById("social-sources").innerHTML = social.map(renderSourceRow).join("") || '<p class="hint">None yet.</p>';
+  document.getElementById("job-sources").innerHTML = jobs.map(renderSourceRow).join("") || '<p class="hint">None yet.</p>';
 
   document.querySelectorAll(".edit-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -525,6 +938,7 @@ function sourceFormHtml() {
           <option value="website">Website</option>
           <option value="newsletter">Newsletter</option>
           <option value="social">Social Media</option>
+          <option value="job">Job/thesis offer</option>
         </select>
       </div>
       <div class="field">
@@ -546,6 +960,14 @@ function sourceFormHtml() {
         expose a public feed, and this app won't try to bypass anti-bot
         measures to scrape them.
       </div>
+      <div id="new-forced-job-tag-field" class="field" style="display:none;">
+        <label>Always tag as (optional)</label>
+        <select id="new-source-forced-job-tag">
+          <option value="">Auto-classify from title keywords</option>
+          ${state.jobTags.map((t) => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`).join("")}
+        </select>
+        <p class="hint">Skips keyword matching entirely for this source — every listing gets this tag, regardless of title wording. Use this when a whole page is reliably one type of offer (a lab's own "Theses" page, e.g.).</p>
+      </div>
       <div class="field">
         <label>URL</label>
         <input type="text" id="new-source-url" placeholder="https://example.com/news" style="width: 320px">
@@ -557,13 +979,15 @@ function sourceFormHtml() {
       </div>
       <div id="detect-status" class="hint"></div>
       <div id="manual-selectors" style="display:none; margin-top: 12px;">
-        <p class="hint">Fill in CSS selectors for the article listing page (see CLAUDE.md for how to find these in your browser's dev tools).</p>
-        <div class="field"><label>Article container selector</label><input type="text" id="sel-article" style="width:100%"></div>
-        <div class="field"><label>Title selector</label><input type="text" id="sel-title" style="width:100%"></div>
-        <div class="field"><label>Link selector</label><input type="text" id="sel-link" style="width:100%"></div>
+        <p class="hint">Fill in CSS selectors for the article listing page, or click "🎯 Pick" to open a live preview and click the element you want instead of hand-typing one.</p>
+        ${selectorFieldHtml("add", "article", "Article container selector")}
+        ${selectorFieldHtml("add", "title", "Title selector")}
+        ${selectorFieldHtml("add", "link", "Link selector")}
         <div class="field"><label>Base URL (for relative links)</label><input type="text" id="sel-base" style="width:100%"></div>
-        <div class="field"><label>Date selector (optional)</label><input type="text" id="sel-date" style="width:100%"></div>
-        <div class="field"><label>Image selector (optional)</label><input type="text" id="sel-image" style="width:100%"></div>
+        ${selectorFieldHtml("add", "date", "Date selector (optional)")}
+        ${selectorFieldHtml("add", "date-year", "Year selector (optional -- only for pages that group listings under a separate year heading instead of repeating the year on each item, e.g. Subatech's actualites page)")}
+        ${selectorFieldHtml("add", "deadline", "Application deadline selector (optional -- Jobs only, e.g. a \"closes on...\" date on the listing)")}
+        ${selectorFieldHtml("add", "image", "Image selector (optional)")}
       </div>
       <input type="hidden" id="detected-feed-url">
       <div style="margin-top: 14px;">
@@ -588,6 +1012,7 @@ function editSourceFormHtml(s) {
           <option value="website" ${s.category === "website" ? "selected" : ""}>Website</option>
           <option value="newsletter" ${s.category === "newsletter" ? "selected" : ""}>Newsletter</option>
           <option value="social" ${s.category === "social" ? "selected" : ""}>Social Media</option>
+          <option value="job" ${s.category === "job" ? "selected" : ""}>Job/thesis offer</option>
         </select>
       </div>
       <div class="field">
@@ -597,6 +1022,14 @@ function editSourceFormHtml(s) {
           ${[...new Set(state.sources.map((x) => x.group_tag).filter(Boolean))].sort()
             .map((g) => `<option value="${escapeHtml(g)}">`).join("")}
         </datalist>
+      </div>
+      <div id="edit-forced-job-tag-field" class="field" style="${s.category === "job" ? "" : "display:none; "}">
+        <label>Always tag as (optional)</label>
+        <select id="edit-source-forced-job-tag">
+          <option value="">Auto-classify from title keywords</option>
+          ${state.jobTags.map((t) => `<option value="${escapeHtml(t.name)}" ${s.forced_job_tag === t.name ? "selected" : ""}>${escapeHtml(t.name)}</option>`).join("")}
+        </select>
+        <p class="hint">Skips keyword matching entirely — every listing from this source gets this tag. Use for a source that's reliably one type of offer (a lab's own "Theses" page, e.g.).</p>
       </div>
       <div class="field">
         <label>Kind</label>
@@ -610,13 +1043,15 @@ function editSourceFormHtml(s) {
         <input type="text" id="edit-url" value="${escapeHtml(s.url)}" style="width:100%">
       </div>
       <div id="edit-css-fields" style="${s.kind === "css" ? "" : "display:none; "}margin-top: 12px;">
-        <p class="hint">Only used when Kind is "CSS selectors".</p>
-        <div class="field"><label>Article container selector</label><input type="text" id="edit-sel-article" value="${escapeHtml(s.article_selector || "")}" style="width:100%"></div>
-        <div class="field"><label>Title selector</label><input type="text" id="edit-sel-title" value="${escapeHtml(s.title_selector || "")}" style="width:100%"></div>
-        <div class="field"><label>Link selector</label><input type="text" id="edit-sel-link" value="${escapeHtml(s.link_selector || "")}" style="width:100%"></div>
+        <p class="hint">Only used when Kind is "CSS selectors". Click "🎯 Pick" to open a live preview and click the element you want instead of hand-typing a selector.</p>
+        ${selectorFieldHtml("edit", "article", "Article container selector", s.article_selector)}
+        ${selectorFieldHtml("edit", "title", "Title selector", s.title_selector)}
+        ${selectorFieldHtml("edit", "link", "Link selector", s.link_selector)}
         <div class="field"><label>Base URL (for relative links)</label><input type="text" id="edit-sel-base" value="${escapeHtml(s.base_url || "")}" style="width:100%"></div>
-        <div class="field"><label>Date selector (optional)</label><input type="text" id="edit-sel-date" value="${escapeHtml(s.date_selector || "")}" style="width:100%"></div>
-        <div class="field"><label>Image selector (optional)</label><input type="text" id="edit-sel-image" value="${escapeHtml(s.image_selector || "")}" style="width:100%"></div>
+        ${selectorFieldHtml("edit", "date", "Date selector (optional)", s.date_selector)}
+        ${selectorFieldHtml("edit", "date-year", "Year selector (optional -- see \"Add a source\" for when this is needed)", s.date_year_selector)}
+        ${selectorFieldHtml("edit", "deadline", "Application deadline selector (optional -- Jobs only)", s.deadline_selector)}
+        ${selectorFieldHtml("edit", "image", "Image selector (optional)", s.image_selector)}
       </div>
       <div class="field">
         <label>User-Agent override (optional)</label>
@@ -642,6 +1077,10 @@ function openEditSourceForm(source, rowEl) {
 
   document.getElementById("edit-kind").addEventListener("change", (e) => {
     document.getElementById("edit-css-fields").style.display = e.target.value === "css" ? "block" : "none";
+  });
+
+  document.getElementById("edit-category").addEventListener("change", (e) => {
+    document.getElementById("edit-forced-job-tag-field").style.display = e.target.value === "job" ? "block" : "none";
   });
 
   document.getElementById("edit-cancel-btn").addEventListener("click", () => {
@@ -670,6 +1109,9 @@ function openEditSourceForm(source, rowEl) {
       link_selector: document.getElementById("edit-sel-link").value.trim() || null,
       base_url: document.getElementById("edit-sel-base").value.trim() || null,
       date_selector: document.getElementById("edit-sel-date").value.trim() || null,
+      date_year_selector: document.getElementById("edit-sel-date-year").value.trim() || null,
+      deadline_selector: document.getElementById("edit-sel-deadline").value.trim() || null,
+      forced_job_tag: document.getElementById("edit-source-forced-job-tag").value || null,
       image_selector: document.getElementById("edit-sel-image").value.trim() || null,
       user_agent: document.getElementById("edit-user-agent").value.trim() || null,
     };
@@ -691,6 +1133,7 @@ document.getElementById("add-source-btn").addEventListener("click", () => {
 
   document.getElementById("new-source-category").addEventListener("change", (e) => {
     document.getElementById("social-hint").style.display = e.target.value === "social" ? "block" : "none";
+    document.getElementById("new-forced-job-tag-field").style.display = e.target.value === "job" ? "block" : "none";
   });
 
   document.getElementById("detect-feed-btn").addEventListener("click", async () => {
@@ -751,8 +1194,9 @@ document.getElementById("add-source-btn").addEventListener("click", () => {
     }
 
     const groupTag = document.getElementById("new-source-group").value.trim() || null;
+    const forcedJobTag = document.getElementById("new-source-forced-job-tag")?.value || null;
     const body = feedUrl
-      ? { name, category, kind: "rss", url: feedUrl, group_tag: groupTag }
+      ? { name, category, kind: "rss", url: feedUrl, group_tag: groupTag, forced_job_tag: forcedJobTag }
       : {
           name, category, kind: "css", url,
           article_selector: document.getElementById("sel-article").value.trim(),
@@ -760,8 +1204,11 @@ document.getElementById("add-source-btn").addEventListener("click", () => {
           link_selector: document.getElementById("sel-link").value.trim(),
           base_url: document.getElementById("sel-base").value.trim() || url,
           date_selector: document.getElementById("sel-date").value.trim() || null,
+          date_year_selector: document.getElementById("sel-date-year").value.trim() || null,
+          deadline_selector: document.getElementById("sel-deadline").value.trim() || null,
           image_selector: document.getElementById("sel-image").value.trim() || null,
           group_tag: groupTag,
+          forced_job_tag: forcedJobTag,
         };
 
     try {
@@ -800,7 +1247,106 @@ async function loadSettings() {
       loadSettings();
     });
   });
+
+  await loadJobTags();
 }
+
+// -------------------------------------------------------------------------
+// Job tags management (Settings tab) -- keyword -> tag mapping used by
+// Jobs' auto-tagging (see scraper.classify_job). Each tag's keywords are
+// edited as one comma-separated text field, matching the app's existing
+// "plain text input, split on save" convention (same shape as e.g. the
+// group_tag inputs elsewhere) rather than a separate add/remove-per-
+// keyword widget.
+// -------------------------------------------------------------------------
+
+async function loadJobTags() {
+  // Already ordered by sort_order/priority (GET /api/job-tags) -- the
+  // order shown here *is* the order classify_job() checks them in, so
+  // move-up/move-down directly controls classification priority (e.g.
+  // "Post-Doc checked before PhD").
+  const tags = await api("/api/job-tags");
+  state.jobTags = tags;
+  const list = document.getElementById("job-tags-list");
+  list.innerHTML = tags.length
+    ? tags.map((t, i) => `
+        <div class="source-row" data-tag-id="${t.id}">
+          <div class="job-tag-move">
+            <button class="move-job-tag-btn" data-dir="up" ${i === 0 ? "disabled" : ""} title="Higher priority">&#9650;</button>
+            <button class="move-job-tag-btn" data-dir="down" ${i === tags.length - 1 ? "disabled" : ""} title="Lower priority">&#9660;</button>
+          </div>
+          <input type="text" class="job-tag-name" value="${escapeHtml(t.name)}" style="width: 140px">
+          <input type="text" class="job-tag-keywords" value="${escapeHtml(t.keywords.join(", "))}" style="flex: 1" placeholder="keyword1, keyword2, ...">
+          <button class="save-job-tag-btn">Save</button>
+          <button class="danger delete-job-tag-btn">Delete</button>
+        </div>`).join("")
+    : '<p class="hint">No tags yet.</p>';
+
+  list.querySelectorAll(".move-job-tag-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest(".source-row");
+      await api(`/api/job-tags/${row.dataset.tagId}/move?direction=${btn.dataset.dir}`, { method: "POST" });
+      loadJobTags();
+    });
+  });
+
+  list.querySelectorAll(".save-job-tag-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest(".source-row");
+      const id = row.dataset.tagId;
+      const name = row.querySelector(".job-tag-name").value.trim();
+      const keywords = row.querySelector(".job-tag-keywords").value.split(",").map((k) => k.trim()).filter(Boolean);
+      const status = document.getElementById("job-tags-status");
+      try {
+        await api(`/api/job-tags/${id}`, { method: "PUT", body: JSON.stringify({ name, keywords }) });
+        status.textContent = "Saved. Click \"Reapply tags to existing listings\" to apply the change retroactively.";
+        loadJobTags();
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+      }
+    });
+  });
+
+  list.querySelectorAll(".delete-job-tag-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest(".source-row");
+      await api(`/api/job-tags/${row.dataset.tagId}`, { method: "DELETE" });
+      loadJobTags();
+    });
+  });
+}
+
+document.getElementById("add-job-tag-btn").addEventListener("click", async () => {
+  const status = document.getElementById("job-tags-status");
+  const nameEl = document.getElementById("new-job-tag-name");
+  const keywordsEl = document.getElementById("new-job-tag-keywords");
+  const name = nameEl.value.trim();
+  const keywords = keywordsEl.value.split(",").map((k) => k.trim()).filter(Boolean);
+  if (!name) {
+    status.textContent = "Tag name is required.";
+    return;
+  }
+  try {
+    await api("/api/job-tags", { method: "POST", body: JSON.stringify({ name, keywords }) });
+    nameEl.value = "";
+    keywordsEl.value = "";
+    status.textContent = "Tag added.";
+    loadJobTags();
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+  }
+});
+
+document.getElementById("retag-jobs-btn").addEventListener("click", async () => {
+  const status = document.getElementById("job-tags-status");
+  status.textContent = "Reapplying tags…";
+  try {
+    const result = await api("/api/job-tags/retag", { method: "POST" });
+    status.textContent = `Done -- ${result.updated} job listing(s) re-checked.`;
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+  }
+});
 
 document.getElementById("save-settings-btn").addEventListener("click", async () => {
   const status = document.getElementById("settings-status");
@@ -849,6 +1395,134 @@ function applyFeedSize(size) {
 
 document.querySelectorAll("#size-toggle .view-toggle-btn").forEach((btn) => {
   btn.addEventListener("click", () => applyFeedSize(btn.dataset.size));
+});
+
+// -------------------------------------------------------------------------
+// Selector picker: point-and-click CSS-selector picking for the Add/Edit
+// source forms' manual CSS-selector fields, backed by
+// GET /api/sources/preview-html + static/picker-inject.js (see web.py and
+// that file's own comments for the mechanics). One shared modal instance
+// reused across every "🎯 Pick" button on the page -- only one form (Add
+// or Edit) is ever open at a time in this app, so there's never a need for
+// more than one picker either.
+// -------------------------------------------------------------------------
+
+const FIELD_LABELS = {
+  article: "Article container", title: "Title", link: "Link",
+  date: "Date", "date-year": "Year", deadline: "Application deadline", image: "Image",
+};
+
+let pickerIframe = null;
+let pickerIframeUrl = null;
+let pickerReady = false;
+let pickerPendingMode = null; // queued picker-mode message if sent before "picker-ready"
+let pickerWaitingField = null; // { formType, field } while a pick is in flight
+
+function pickerFieldInput(formType, field) {
+  const id = (formType === "edit" ? "edit-sel-" : "sel-") + field;
+  return document.getElementById(id);
+}
+
+function pickerContainerSelector(formType) {
+  return (pickerFieldInput(formType, "article")?.value || "").trim();
+}
+
+function sendPickerMode(mode, containerSelector) {
+  const message = { type: "picker-mode", mode, containerSelector };
+  if (!pickerReady) {
+    pickerPendingMode = message;
+    return;
+  }
+  pickerIframe.contentWindow.postMessage(message, "*");
+}
+
+function openPicker(formType, field) {
+  const urlInput = document.getElementById(formType === "edit" ? "edit-url" : "new-source-url");
+  const url = (urlInput?.value || "").trim();
+  if (!url) {
+    alert("Enter a URL first.");
+    return;
+  }
+
+  pickerWaitingField = { formType, field };
+  const status = document.getElementById("picker-status");
+
+  if (pickerIframeUrl !== url) {
+    // (Re)build the modal for a new/changed URL -- switching which field
+    // you're picking for on the *same* URL reuses the already-loaded
+    // iframe instead (see below) so it doesn't re-fetch on every click.
+    document.getElementById("picker-modal")?.remove();
+    pickerReady = false;
+    pickerIframeUrl = url;
+
+    const wrapper = document.createElement("div");
+    wrapper.id = "picker-modal";
+    wrapper.className = "modal picker-modal";
+    wrapper.innerHTML = `
+      <div class="modal__box">
+        <div class="modal__head">
+          <h3>Pick an element</h3>
+          <button class="modal__close">&times;</button>
+        </div>
+        <div class="picker-status" id="picker-status">Loading preview…</div>
+        <div class="picker-frame-wrap">
+          <iframe id="picker-iframe" sandbox="allow-scripts" src="/api/sources/preview-html?url=${encodeURIComponent(url)}"></iframe>
+        </div>
+      </div>`;
+    document.body.appendChild(wrapper);
+    wrapper.addEventListener("click", (e) => { if (e.target === wrapper) closePicker(); });
+    wrapper.querySelector(".modal__close").addEventListener("click", closePicker);
+    pickerIframe = document.getElementById("picker-iframe");
+  }
+
+  const mode = field === "article" ? "container" : "child";
+  const containerSelector = mode === "child" ? pickerContainerSelector(formType) : null;
+  sendPickerMode(mode, containerSelector);
+
+  const label = FIELD_LABELS[field];
+  const currentStatus = document.getElementById("picker-status");
+  if (currentStatus) {
+    currentStatus.innerHTML = `Click the element to use for <strong>${escapeHtml(label)}</strong> on the preview below.`;
+  }
+}
+
+function closePicker() {
+  document.getElementById("picker-modal")?.remove();
+  pickerIframe = null;
+  pickerIframeUrl = null;
+  pickerReady = false;
+  pickerPendingMode = null;
+  pickerWaitingField = null;
+}
+
+window.addEventListener("message", (e) => {
+  if (!pickerIframe || e.source !== pickerIframe.contentWindow) return;
+  const data = e.data || {};
+  if (data.type === "picker-ready") {
+    pickerReady = true;
+    if (pickerPendingMode) {
+      pickerIframe.contentWindow.postMessage(pickerPendingMode, "*");
+      pickerPendingMode = null;
+    }
+  } else if (data.type === "picker-selected" && pickerWaitingField) {
+    const { formType, field } = pickerWaitingField;
+    const input = pickerFieldInput(formType, field);
+    if (input) input.value = data.selector;
+    pickerWaitingField = null;
+    const status = document.getElementById("picker-status");
+    if (status) {
+      const label = FIELD_LABELS[field];
+      const countMsg = data.matchCount > 1
+        ? `matches ${data.matchCount} elements on the page`
+        : data.matchCount === 1 ? "matches 1 element" : "didn't uniquely match anything -- check it by hand";
+      status.innerHTML = `Set <strong>${escapeHtml(label)}</strong> to <code>${escapeHtml(data.selector || "(itself)")}</code> (${countMsg}). Click "🎯 Pick" on another field, or close this preview.`;
+    }
+  }
+});
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".pick-btn");
+  if (btn) openPicker(btn.dataset.form, btn.dataset.field);
 });
 
 // -------------------------------------------------------------------------

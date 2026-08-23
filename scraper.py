@@ -9,6 +9,7 @@ only the source of configuration changed, from SOURCES[...] to DB rows.
 """
 
 import re
+import json
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlparse
 
 import requests
+import soupsieve as sv
 from bs4 import BeautifulSoup
 
 import db
@@ -76,6 +78,97 @@ def classify_article(title: str) -> str:
     return DEFAULT_CONTENT_TAG
 
 
+# --------------------------------------------------------------------------
+# JOB TAGS (user-editable title classification for category="job" sources)
+# --------------------------------------------------------------------------
+# Unlike CONTENT_TAG_RULES above (a fixed physics-topic taxonomy baked into
+# this file), job-offer "type" tags (Fellowship/PhD/Internship/...) are
+# user-defined via the Settings tab and stored in the job_tags table --
+# db.py's DEFAULT_JOB_TAGS only seeds the table's *first* run, same "seed
+# once, then it's the user's data" contract as db.py's other seeded tables.
+# No default fallback tag the way General Physics is for content_tag --
+# "no keyword matched this title" is a real, legitimate, distinct state
+# here (most job postings won't match any of the 5 seeded tags), not
+# something to force into a catch-all.
+
+def get_job_tags() -> list[dict]:
+    conn = db.get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, name, keywords FROM job_tags ORDER BY sort_order, id"
+        ).fetchall()
+        return [{"id": r["id"], "name": r["name"], "keywords": json.loads(r["keywords"])} for r in rows]
+    finally:
+        conn.close()
+
+
+def classify_job(title: str, job_tags: list[dict]) -> str | None:
+    """First-tag-whose-keyword-matches wins, same "ordered, first match"
+    shape as classify_article -- ordering here is `job_tags.sort_order`
+    (falling back to `id`/creation order for ties or un-set rows), editable
+    per-tag via the Settings tab's move-up/move-down controls. **Ordering
+    is a real fix, not just cosmetic**: Post-Doc is seeded first
+    specifically so a title like "Post-doctorant en cosmologie" (a real
+    LPSC posting) matches Post-Doc's own keywords before PhD's ever get
+    checked -- see the word-boundary caveat below for why the *matching*
+    logic alone can't resolve that case.
+
+    Matches on a **word boundary**, not a plain substring -- caught during
+    testing: "thèse" as a bare substring matched inside "Synthèse de
+    nouveaux éléments..." (a materials-science posting with zero relation
+    to a thesis), purely because "synthèse" happens to contain "thèse" as
+    a run of characters. `\\bthèse\\b` doesn't have this problem (no word
+    boundary between "syn" and "thèse" in "synthèse", since they're one
+    contiguous word) while still matching a standalone "thèse" correctly.
+    This does NOT catch every compound-word collision -- "doctorant" still
+    matches inside "post-doctorant" (a hyphen *is* a word boundary), which
+    is exactly why Post-Doc's own keywords (checked first, see above) are
+    the real fix for that specific case rather than the matching logic
+    itself. A source can also bypass this keyword matching entirely via
+    `sources.forced_job_tag` (see `persist_articles()`/`retag_jobs()`) for
+    sites whose *entire* listing is reliably one type of offer regardless
+    of title wording."""
+    for tag in job_tags:
+        for keyword in tag["keywords"]:
+            if keyword and re.search(rf"\b{re.escape(keyword)}\b", title, re.I):
+                return tag["name"]
+    return None
+
+
+def retag_jobs() -> int:
+    """Recompute job_tag for every category="job" article using the
+    *current* job_tags table -- run after the user edits/adds/deletes a tag
+    in Settings, so keyword changes actually apply to already-scraped
+    listings, not just future ones. Mirrors retag_all_articles()'s "full
+    recompute" shape, scoped to job articles and triggerable from the UI
+    (unlike retag_all_articles, which is a run-by-hand one-liner) since tag
+    keywords are expected to change routinely, not just once at a scheme
+    redesign. Also applies each row's source's `forced_job_tag` override
+    (see `persist_articles()`), so pointing a source at a forced tag for
+    the first time retags its *existing* rows immediately rather than only
+    ever affecting new scrapes -- this is what actually applied "always
+    PhD"/"always Outreach" overrides to sources that already had articles
+    when the override was set. Returns how many rows were updated."""
+    job_tags = get_job_tags()
+    conn = db.get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT articles.id, articles.title, sources.forced_job_tag FROM articles "
+            "JOIN sources ON sources.id = articles.source_id "
+            "WHERE sources.category = 'job'"
+        ).fetchall()
+        if not rows:
+            return 0
+        conn.executemany(
+            "UPDATE articles SET job_tag = ? WHERE id = ?",
+            [(r["forced_job_tag"] or classify_job(r["title"], job_tags), r["id"]) for r in rows],
+        )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
 class Article:
     def __init__(
         self,
@@ -86,6 +179,10 @@ class Article:
         pub_date: datetime | None = None,
         image_url: str | None = None,
         content_tag: str | None = None,
+        deadline: datetime | None = None,
+        category: str | None = None,
+        forced_job_tag: str | None = None,
+        excerpt: str | None = None,
     ):
         self.title = title.strip()
         self.link = link.strip()
@@ -94,6 +191,28 @@ class Article:
         self.pub_date = pub_date
         self.image_url = image_url.strip() if image_url else None
         self.content_tag = content_tag or classify_article(self.title)
+        # Short plain-text blurb, only ever populated for kind="rss"
+        # sources (see extract_excerpt()) -- None for every kind="css"
+        # source, which has no body text on the page to draw one from.
+        self.excerpt = excerpt.strip() if excerpt else None
+        # Application deadline for a job/thesis offer -- see sources.deadline_selector.
+        # Unrelated to pub_date (when the *listing* was posted); this is when it
+        # *closes*. Only ever set for category="job" sources that expose one
+        # (most don't), None everywhere else.
+        self.deadline = deadline
+        # The source's category ("job", "website", ...) -- carried through
+        # only so persist_articles() knows whether to run job-tag
+        # classification (see classify_job()); not itself persisted onto the
+        # articles row (sources.category via the JOIN is the real source of
+        # truth for display, this is just in-flight plumbing).
+        self.category = category
+        # A source-level override (sources.forced_job_tag) that always wins
+        # over classify_job()'s keyword matching -- for sites whose entire
+        # listing is reliably one type of offer (e.g. a lab's own "Theses"
+        # page) regardless of how any individual title happens to be
+        # worded. None for every source that doesn't set one (the common
+        # case), in which case classify_job() runs as normal.
+        self.forced_job_tag = forced_job_tag
 
     def __repr__(self):
         return f"<Article {self.source_name!r} {self.title!r}>"
@@ -155,6 +274,20 @@ def first_img_src(html: str | None) -> str | None:
 
 
 TITLE_FALLBACK_MAX_LEN = 100
+EXCERPT_MAX_LEN = 300
+
+
+def html_to_text(html_fragment: str | None, max_len: int | None = None) -> str:
+    """Strip HTML down to plain text, truncated at a word boundary --
+    shared by derive_title() (title fallback) and extract_excerpt() below,
+    since both are "turn a feed's raw <description>/<summary> HTML into a
+    short, readable plain-text blurb" with only the length differing."""
+    if not html_fragment:
+        return ""
+    text = BeautifulSoup(html_fragment, "html.parser").get_text(" ", strip=True)
+    if max_len and len(text) > max_len:
+        text = text[:max_len].rsplit(" ", 1)[0] + "…"
+    return text
 
 
 def derive_title(description_html: str | None) -> str:
@@ -164,12 +297,18 @@ def derive_title(description_html: str | None) -> str:
     rather than emitting an empty one. Falls back to the post's own text,
     truncated at a word boundary, so those items aren't silently dropped
     for lacking something they were never going to have."""
-    if not description_html:
-        return ""
-    text = BeautifulSoup(description_html, "html.parser").get_text(" ", strip=True)
-    if len(text) > TITLE_FALLBACK_MAX_LEN:
-        text = text[:TITLE_FALLBACK_MAX_LEN].rsplit(" ", 1)[0] + "…"
-    return text
+    return html_to_text(description_html, TITLE_FALLBACK_MAX_LEN)
+
+
+def extract_excerpt(description_html: str | None) -> str | None:
+    """A short plain-text blurb for an article, from an RSS item's
+    <description> or an Atom entry's <summary>/<content> -- only ever
+    available for kind="rss" sources; kind="css" sources have no body
+    text on the page at all (see "Content tagging" above for the same
+    limitation already documented for classify_article()), so their
+    articles simply have no excerpt rather than a fabricated one."""
+    text = html_to_text(description_html, EXCERPT_MAX_LEN)
+    return text or None
 
 
 def extract_rss_image(item: ET.Element) -> str | None:
@@ -222,6 +361,7 @@ def parse_feed_items(content: bytes):
                     "link": link,
                     "pub_date": parse_rss_date(item.findtext("pubDate")),
                     "image": extract_rss_image(item),
+                    "excerpt": extract_excerpt(item.findtext("description")),
                 }
         return
 
@@ -242,11 +382,13 @@ def parse_feed_items(content: bytes):
                         pub_date = pub_date.replace(tzinfo=timezone.utc)
                 except ValueError:
                     pass
+            content_html = entry.findtext(f"{ATOM_NS}content")
             yield {
                 "title": title,
                 "link": link,
                 "pub_date": pub_date,
-                "image": first_img_src(entry.findtext(f"{ATOM_NS}content")),
+                "image": first_img_src(content_html),
+                "excerpt": extract_excerpt(entry.findtext(f"{ATOM_NS}summary") or content_html),
             }
 
 
@@ -279,6 +421,9 @@ def scrape_rss(source: "sqlite3.Row") -> list[Article]:
             source_name=source["name"],
             pub_date=entry["pub_date"],
             image_url=entry["image"],
+            category=source["category"],
+            forced_job_tag=source["forced_job_tag"],
+            excerpt=entry.get("excerpt"),
         )
         for entry in entries[:MAX_ARTICLES_PER_FETCH]
     ]
@@ -291,7 +436,61 @@ def scrape_rss(source: "sqlite3.Row") -> list[Article]:
 TEXT_DATE_PATTERNS = [
     (re.compile(r"[A-Z][a-z]+\s+\d{1,2},\s*\d{4}"), "%B %d, %Y"),
     (re.compile(r"\d{2}\.\d{2}\.\d{4}"), "%m.%d.%Y"),
+    # JUNO's news list: "(2026.06.12)", Y.M.D order -- distinguished from the
+    # MM.DD.YYYY pattern above by a 4-digit first group, so the two can't
+    # ambiguously match the same text.
+    (re.compile(r"\d{4}\.\d{2}\.\d{2}"), "%Y.%m.%d"),
+    # Slash-separated dates ("jusqu'au 12/05/2026", IPHC's job-offer deadline
+    # text) -- treated as day/month/year, same default assumption
+    # FRENCH_DATE_RE makes for every other numeric-ish French date in this
+    # file (this app's own sources are overwhelmingly French/European, not
+    # American, so DD/MM/YYYY is the safer default here, not MM/DD/YYYY).
+    (re.compile(r"\d{2}/\d{2}/\d{4}"), "%d/%m/%Y"),
 ]
+
+# Abbreviated English month names ("Oct 9, 2025", SuperNEMO's news list) --
+# %B in TEXT_DATE_PATTERNS above only matches a *full* month name ("October"),
+# so "Oct 9, 2025" falls through it; %b would parse it but is exactly the
+# locale-dependent strptime behavior this file otherwise avoids (see
+# FRENCH_MONTHS's comment). Hand-rolled for the same reason, same
+# `name.startswith(abbrev)` shape as `_french_month_number` -- every English
+# month's standard 3-letter abbreviation is already a distinguishing prefix
+# of its own full name, so one table covers "Oct"/"October" alike with no
+# separate full-name list needed.
+EN_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+EN_DATE_MDY_RE = re.compile(r"([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})")
+# Auger's news list uses "02 April 2026" (day first, no comma) -- the same
+# day-then-month-then-year order parse_french_date already has to handle,
+# just with an English month name.
+EN_DATE_DMY_RE = re.compile(r"(\d{1,2})\s+([A-Za-z]+)\.?,?\s+(\d{4})")
+
+
+def _english_month_number(name: str) -> int | None:
+    name = name.lower().rstrip(".")
+    for abbrev, num in EN_MONTHS.items():
+        if name.startswith(abbrev):
+            return num
+    return None
+
+
+def parse_english_date(text: str) -> datetime | None:
+    for regex, groups_are_dmy in ((EN_DATE_DMY_RE, True), (EN_DATE_MDY_RE, False)):
+        match = regex.search(text)
+        if not match:
+            continue
+        a, b, year = match.groups()
+        day, month_name = (a, b) if groups_are_dmy else (b, a)
+        month = _english_month_number(month_name)
+        if not month:
+            continue
+        try:
+            return datetime(int(year), month, int(day), tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
 
 # French sites (CERN's /fr/feed/, IN2P3, CNRS News, CPPM) use "24 juil. 2026,
 # 09:09:38"-style dates -- not covered by TEXT_DATE_PATTERNS/strptime, which
@@ -306,6 +505,13 @@ FRENCH_MONTHS = {
 FRENCH_DATE_RE = re.compile(
     r"(\d{1,2})\s+([a-zéû]+)\.?\s+(\d{4})(?:,?\s*(\d{1,2}):(\d{2}):(\d{2}))?", re.I
 )
+
+# GANIL's news list uses the reverse order, "juin 15, 2026" (month day, year
+# -- the same shape as the English TEXT_DATE_PATTERNS "Month D, YYYY" entry,
+# just with a French month name, so that pattern's %B strptime can't parse
+# it under a non-French locale). Tried as a fallback, not the primary
+# pattern, since day-month-year is what every other French source here uses.
+FRENCH_DATE_MDY_RE = re.compile(r"([a-zéû]+)\.?\s+(\d{1,2}),?\s+(\d{4})", re.I)
 
 
 def _french_month_number(name: str) -> int | None:
@@ -322,20 +528,30 @@ def _french_month_number(name: str) -> int | None:
 
 def parse_french_date(text: str) -> datetime | None:
     match = FRENCH_DATE_RE.search(text)
-    if not match:
-        return None
-    day, month_name, year, hour, minute, second = match.groups()
-    month = _french_month_number(month_name)
-    if not month:
-        return None
-    try:
-        return datetime(
-            int(year), month, int(day),
-            int(hour or 0), int(minute or 0), int(second or 0),
-            tzinfo=timezone.utc,
-        )
-    except ValueError:
-        return None
+    if match:
+        day, month_name, year, hour, minute, second = match.groups()
+        month = _french_month_number(month_name)
+        if month:
+            try:
+                return datetime(
+                    int(year), month, int(day),
+                    int(hour or 0), int(minute or 0), int(second or 0),
+                    tzinfo=timezone.utc,
+                )
+            except ValueError:
+                pass
+
+    match = FRENCH_DATE_MDY_RE.search(text)
+    if match:
+        month_name, day, year = match.groups()
+        month = _french_month_number(month_name)
+        if month:
+            try:
+                return datetime(int(year), month, int(day), tzinfo=timezone.utc)
+            except ValueError:
+                pass
+
+    return None
 
 
 def parse_css_date(date_el) -> datetime | None:
@@ -361,7 +577,27 @@ def parse_css_date(date_el) -> datetime | None:
         except ValueError:
             continue
 
-    return parse_french_date(text)
+    return parse_english_date(text) or parse_french_date(text)
+
+
+YEAR_RE = re.compile(r"\b\d{4}\b")
+
+
+def find_preceding_year(container, year_selector: str) -> str | None:
+    """Some listing pages (Subatech's news/actualites page, e.g.) group
+    articles under a year heading rather than repeating the year on every
+    item -- each article's own date_selector only ever yields day+month
+    ("22 juil."), with the year living in a separate <h3> that precedes a
+    whole block of articles, not inside any single article's own container.
+    A plain CSS selector can't express "nearest preceding sibling of an
+    ancestor", so this walks backwards from the container in actual document
+    order (BeautifulSoup's find_all_previous, nearest first) and tests each
+    element against year_selector with soupsieve.match -- already a bs4
+    dependency here for :has() support, so no new package needed."""
+    for el in container.find_all_previous(True):
+        if sv.match(year_selector, el):
+            return el.get_text(strip=True)
+    return None
 
 
 def resolve_url(href: str, base_url: str) -> str:
@@ -385,8 +621,14 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
 
     articles: list[Article] = []
     for container in containers[:MAX_ARTICLES_PER_FETCH]:
-        title_el = container.select_one(source["title_selector"])
-        link_el = container.select_one(source["link_selector"])
+        # A blank title/link_selector means "the article container itself is
+        # the title/link element" -- some listing pages have no wrapping
+        # element around a bare <a> for select_one() to find as a descendant
+        # (e.g. Subatech's theses page: <a> directly under <ul>, no <li>).
+        # Every pre-existing source has a real, non-blank selector here, so
+        # this is a no-op for them.
+        title_el = container.select_one(source["title_selector"]) if source["title_selector"] else container
+        link_el = container.select_one(source["link_selector"]) if source["link_selector"] else container
 
         if not title_el or not link_el:
             continue
@@ -409,7 +651,14 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
 
         pub_date = None
         if source["date_selector"]:
-            pub_date = parse_css_date(container.select_one(source["date_selector"]))
+            date_el = container.select_one(source["date_selector"])
+            pub_date = parse_css_date(date_el)
+            if pub_date is None and date_el is not None and source["date_year_selector"]:
+                date_text = date_el.get_text(" ", strip=True)
+                if date_text and not YEAR_RE.search(date_text):
+                    year_text = find_preceding_year(container, source["date_year_selector"])
+                    if year_text and YEAR_RE.search(year_text):
+                        pub_date = parse_french_date(f"{date_text} {year_text}")
 
         image_url = None
         if source["image_selector"]:
@@ -417,6 +666,10 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
             src = image_el.get("src", "").strip() if image_el else ""
             if src:
                 image_url = resolve_url(src, source["base_url"])
+
+        deadline = None
+        if source["deadline_selector"]:
+            deadline = parse_css_date(container.select_one(source["deadline_selector"]))
 
         articles.append(
             Article(
@@ -426,6 +679,9 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
                 source_name=source["name"],
                 pub_date=pub_date,
                 image_url=image_url,
+                deadline=deadline,
+                category=source["category"],
+                forced_job_tag=source["forced_job_tag"],
             )
         )
 
@@ -489,14 +745,41 @@ def persist_articles(articles: list[Article]) -> list[int]:
     ids of newly-inserted rows."""
     if not articles:
         return []
+    # Only fetched if at least one article is from a job source -- a plain
+    # news-only run (the common case) never touches the job_tags table.
+    job_tags = None
     conn = db.get_conn()
     new_ids = []
     try:
         for a in articles:
+            job_tag = None
+            if a.category == "job":
+                if a.forced_job_tag:
+                    job_tag = a.forced_job_tag
+                else:
+                    if job_tags is None:
+                        job_tags = get_job_tags()
+                    job_tag = classify_job(a.title, job_tags)
+            # A source with no date_selector, or one whose date text didn't
+            # parse, would otherwise leave pub_date NULL -- landing the
+            # article in Feed/Jobs' "Unknown date" bucket forever. Default
+            # it to right now (the moment scraping actually found it)
+            # instead, same fallback `first_seen_at` already recorded
+            # independently -- this only ever fires for a genuinely new
+            # row (INSERT OR IGNORE skips existing ones untouched), so an
+            # article's defaulted date is fixed at first-seen time, not
+            # recomputed on every later scrape.
+            pub_date = a.pub_date or datetime.now(timezone.utc)
             cur = conn.execute(
-                "INSERT OR IGNORE INTO articles (source_id, title, link, pub_date, image_url, content_tag) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (a.source_id, a.title, a.link, a.pub_date.isoformat() if a.pub_date else None, a.image_url, a.content_tag),
+                "INSERT OR IGNORE INTO articles "
+                "(source_id, title, link, pub_date, image_url, content_tag, deadline, job_tag, excerpt) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    a.source_id, a.title, a.link, pub_date.isoformat(),
+                    a.image_url, a.content_tag,
+                    a.deadline.isoformat() if a.deadline else None,
+                    job_tag, a.excerpt,
+                ),
             )
             if cur.rowcount:
                 new_ids.append(cur.lastrowid)
@@ -535,6 +818,79 @@ def backfill_content_tags() -> int:
         return len(rows)
     finally:
         conn.close()
+
+
+def backfill_excerpts(limit: int | None = None) -> int:
+    """One-time (but safely re-runnable) backfill: fills in `excerpt` for
+    already-scraped kind="rss" articles that predate that column, by
+    re-fetching each affected source's *current* feed and matching each
+    missing-excerpt article by `link`. Only kind="rss" sources are
+    attempted -- kind="css" sources have no body text on the page at all
+    to draw an excerpt from (see extract_excerpt()), so their articles are
+    left alone rather than treated as a bug. **Not guaranteed to recover
+    every row**: an older article's link may have already rolled off its
+    source's current feed (most feeds only expose their N most recent
+    items), in which case it simply can't be backfilled this way and stays
+    without an excerpt -- there's no way to recover text that's no longer
+    published anywhere.
+
+    Sources are fetched at most once each regardless of how many of their
+    articles need backfilling (grouped by source_id first), same "don't
+    hammer a site with redundant requests" discipline as every other
+    fetch loop in this file. `limit` caps how many missing-excerpt
+    articles (most-recent-first) are attempted, for a deliberately partial
+    backfill instead of re-fetching every configured RSS source's feed --
+    e.g. `backfill_excerpts(limit=20)` for just the 20 most recent gaps.
+    Not called automatically anywhere; run by hand
+    (`python -c "import scraper; scraper.backfill_excerpts()"`).
+    Returns how many rows were actually updated."""
+    conn = db.get_conn()
+    try:
+        query = (
+            "SELECT articles.id, articles.link, sources.id AS source_id, "
+            "sources.url, sources.user_agent FROM articles "
+            "JOIN sources ON sources.id = articles.source_id "
+            "WHERE articles.excerpt IS NULL AND sources.kind = 'rss' "
+            "ORDER BY articles.pub_date DESC"
+        )
+        if limit is not None:
+            query += " LIMIT ?"
+            rows = conn.execute(query, (limit,)).fetchall()
+        else:
+            rows = conn.execute(query).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return 0
+
+    by_source: dict[int, list] = {}
+    for r in rows:
+        by_source.setdefault(r["source_id"], []).append(r)
+
+    updated = 0
+    conn = db.get_conn()
+    try:
+        for article_rows in by_source.values():
+            source_url = article_rows[0]["url"]
+            user_agent = article_rows[0]["user_agent"] or USER_AGENT
+            content = fetch_bytes(source_url, user_agent, quiet=True)
+            if not content:
+                continue
+            try:
+                entries = list(parse_feed_items(content))
+            except ET.ParseError:
+                continue
+            excerpt_by_link = {e["link"]: e["excerpt"] for e in entries if e.get("excerpt")}
+            for r in article_rows:
+                excerpt = excerpt_by_link.get(r["link"])
+                if excerpt:
+                    conn.execute("UPDATE articles SET excerpt = ? WHERE id = ?", (excerpt, r["id"]))
+                    updated += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return updated
 
 
 def retag_all_articles() -> int:
@@ -634,6 +990,11 @@ def detect_feed(url: str) -> str | None:
 
 def _row_to_article(row) -> Article:
     pub_date = datetime.fromisoformat(row["pub_date"]) if row["pub_date"] else None
+    deadline = (
+        datetime.fromisoformat(row["deadline"])
+        if "deadline" in row.keys() and row["deadline"]
+        else None
+    )
     # content_tag is None for rows scraped before this feature existed --
     # Article.__init__ transparently backfills it via classify_article() on
     # read, no migration script needed. It's just not written back to the
@@ -646,18 +1007,27 @@ def _row_to_article(row) -> Article:
         pub_date=pub_date,
         image_url=row["image_url"],
         content_tag=row["content_tag"] if "content_tag" in row.keys() else None,
+        deadline=deadline,
+        excerpt=row["excerpt"] if "excerpt" in row.keys() else None,
     )
     article.id = row["id"]
     return article
 
 
-def get_articles(only_notified: bool | None = None, ids: list[int] | None = None) -> list[Article]:
+def get_articles(
+    only_notified: bool | None = None,
+    ids: list[int] | None = None,
+    include_archived: bool = False,
+) -> list[Article]:
     """Read articles back out of the DB, newest first.
 
     only_notified=False -> only articles not yet sent out (new since last
     digest run); ids -> only these specific article ids (used to re-fetch
     the rows persist_articles() just inserted, already joined to source
-    names)."""
+    names). include_archived mirrors web.py's list_articles() -- archived
+    articles are excluded by default from both, since an archived job
+    listing showing up in a digest download or the aggregate RSS feed
+    would defeat the point of archiving it."""
     conn = db.get_conn()
     try:
         query = (
@@ -673,6 +1043,8 @@ def get_articles(only_notified: bool | None = None, ids: list[int] | None = None
                 return []
             clauses.append(f"articles.id IN ({','.join('?' for _ in ids)})")
             params.extend(ids)
+        if not include_archived:
+            clauses.append("articles.archived = 0")
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY articles.pub_date DESC"

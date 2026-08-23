@@ -8,6 +8,7 @@ and app settings (digest time, timezone, Discord channel).
 """
 
 import os
+import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -21,13 +22,16 @@ CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('rss', 'css')),
-    category TEXT NOT NULL DEFAULT 'website' CHECK(category IN ('website', 'newsletter', 'social')),
+    category TEXT NOT NULL DEFAULT 'website' CHECK(category IN ('website', 'newsletter', 'social', 'job')),
     url TEXT NOT NULL,
     article_selector TEXT,
     title_selector TEXT,
     link_selector TEXT,
     base_url TEXT,
     date_selector TEXT,
+    date_year_selector TEXT,
+    deadline_selector TEXT,
+    forced_job_tag TEXT,
     image_selector TEXT,
     user_agent TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -47,7 +51,10 @@ CREATE TABLE IF NOT EXISTS articles (
     image_url TEXT,
     first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
     notified INTEGER NOT NULL DEFAULT 0,
-    content_tag TEXT
+    content_tag TEXT,
+    deadline TEXT,
+    archived INTEGER NOT NULL DEFAULT 0,
+    excerpt TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source_id);
 CREATE INDEX IF NOT EXISTS idx_articles_pub_date ON articles(pub_date);
@@ -74,7 +81,46 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS job_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    keywords TEXT NOT NULL DEFAULT '[]',
+    sort_order INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
+
+# User-editable keyword -> tag classification for job/thesis offers (title
+# match, same "first tag whose keyword list matches wins" idea as the
+# physics content_tag system -- but user-configurable via the Settings tab
+# rather than a fixed Python list, since job-offer "type" isn't a fixed
+# taxonomy the way physics topics are). Seeded once, same DEFAULT_SETTINGS
+# pattern; editable/deletable afterward, never re-seeded once the table has
+# any row at all. List order here is seed *and* default sort_order --
+# classify_job() checks tags in sort_order, so a tag earlier in this list
+# wins ties against one later in it.
+#
+# Post-Doc is deliberately first: real posting titles use "Post-doctorant"
+# (LPSC) and "Postdoctoral Researcher" (ALICE) -- both would otherwise get
+# mis-tagged PhD, since "doctorant" is a real substring/word inside
+# "Post-doctorant" (a hyphen is a word boundary, so \bdoctorant\b still
+# matches there -- this is a genuine language collision word-boundary
+# matching alone can't resolve, see classify_job()'s docstring) and
+# "doctoral" is a substring of "Postdoctoral". Checking Post-Doc's own
+# keywords *before* PhD's fixes both at the ordering level instead.
+DEFAULT_JOB_TAGS = [
+    ("Post-Doc", [
+        "postdoc", "post-doc", "postdoctoral", "post-doctoral",
+        "postdoctorant", "post-doctorant", "postdoctorat", "post-doctorat",
+    ]),
+    ("Fellowship", ["fellowship", "fellow"]),
+    ("PhD", ["phd", "doctorant", "thèse", "these", "thesis"]),
+    ("Internship", ["internship", "intern", "stage", "stagiaire"]),
+    ("Professorship", ["professor", "professorship", "professeur", "chair", "faculty"]),
+    ("Outreach", ["outreach", "médiation", "mediation", "communication", "vulgarisation"]),
+    ("Physicist", ["physicist", "physicien"]),
+]
 
 DEFAULT_SETTINGS = {
     "digest_hour": "8",
@@ -102,6 +148,14 @@ COLUMN_MIGRATIONS = [
     ("sources", "last_error", "TEXT"),
     ("articles", "content_tag", "TEXT"),
     ("sources", "group_tag", "TEXT"),
+    ("sources", "date_year_selector", "TEXT"),
+    ("sources", "deadline_selector", "TEXT"),
+    ("articles", "deadline", "TEXT"),
+    ("articles", "job_tag", "TEXT"),
+    ("job_tags", "sort_order", "INTEGER"),
+    ("sources", "forced_job_tag", "TEXT"),
+    ("articles", "archived", "INTEGER NOT NULL DEFAULT 0"),
+    ("articles", "excerpt", "TEXT"),
 ]
 
 
@@ -112,14 +166,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
 
-def _ensure_social_category(conn: sqlite3.Connection) -> None:
-    """SQLite can't ALTER a CHECK constraint in place -- when 'social' was
-    added to sources.category's allowed values, an existing sources table
-    (created under the old two-value constraint) needs a real
-    recreate-and-copy migration, not just an ALTER TABLE ADD COLUMN. Run
-    after _ensure_columns() so every column that might exist is already
-    there to copy. Detected by checking the table's own stored CREATE TABLE
-    SQL for the new value; a no-op once applied.
+def _recreate_sources_table(conn: sqlite3.Connection) -> None:
+    """Shared plumbing for a sources.category CHECK-constraint migration --
+    SQLite can't ALTER a CHECK in place, so adding a new allowed category
+    value needs a real recreate-and-copy, not just an ALTER TABLE ADD
+    COLUMN. Used by both _ensure_social_category and _ensure_job_category.
 
     THE BUG THIS ONCE HAD, for the next table-rename migration: SQLite's
     default `legacy_alter_table=OFF` makes `ALTER TABLE ... RENAME` also
@@ -141,11 +192,9 @@ def _ensure_social_category(conn: sqlite3.Connection) -> None:
     schema still says `REFERENCES sources(id)`, not just re-running the
     logical orphan-row check (`source_id NOT IN (SELECT id FROM sources)`),
     which stayed green the entire time this was broken since it checks
-    actual values, not the broken schema text."""
-    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
-    if row is None or "'social'" in row["sql"]:
-        return
-
+    actual values, not the broken schema text. Every future
+    category-constraint bump should keep going through this same helper
+    rather than hand-rolling the rename again."""
     conn.execute("PRAGMA legacy_alter_table = ON")
     conn.execute("PRAGMA foreign_keys = OFF")
     conn.execute("ALTER TABLE sources RENAME TO sources_old")
@@ -156,6 +205,33 @@ def _ensure_social_category(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE sources_old")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA legacy_alter_table = OFF")
+
+
+def _ensure_social_category(conn: sqlite3.Connection) -> None:
+    """See _recreate_sources_table's docstring for the mechanics and the
+    incident this pattern caused once. Detected by checking the table's own
+    stored CREATE TABLE SQL for the new value; a no-op once applied. Run
+    after _ensure_columns() so every column that might exist is already
+    there to copy."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
+    if row is None or "'social'" in row["sql"]:
+        return
+    _recreate_sources_table(conn)
+
+
+def _ensure_job_category(conn: sqlite3.Connection) -> None:
+    """Same migration as _ensure_social_category, run again now that 'job'
+    has been added to sources.category's allowed values (for the Jobs tab's
+    job/thesis-offer listing sources). Run after _ensure_social_category so
+    a DB that's never seen either migration only pays for one actual
+    rename-recreate-copy, not two -- by the time this checks, the table
+    already has 'social' (or was created fresh with both already present),
+    so this only does real work for a DB that had 'social' but not 'job'
+    yet."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
+    if row is None or "'job'" in row["sql"]:
+        return
+    _recreate_sources_table(conn)
 
 
 def _check_foreign_key_integrity(conn: sqlite3.Connection) -> None:
@@ -187,12 +263,26 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         _ensure_columns(conn)
         _ensure_social_category(conn)
+        _ensure_job_category(conn)
         conn.commit()
         existing = {row["key"] for row in conn.execute("SELECT key FROM settings")}
         for key, value in DEFAULT_SETTINGS.items():
             if key not in existing:
                 env_value = os.environ.get(key.upper(), value)
                 conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, env_value))
+        # Seed only when the table is genuinely empty -- never re-seeded once
+        # the user has added/edited/deleted a single tag, same "seed once,
+        # then hands off to the user" contract as every other seeded table
+        # in this app (SUGGESTED_CATEGORIES-style, not a re-applied default).
+        if conn.execute("SELECT COUNT(*) AS n FROM job_tags").fetchone()["n"] == 0:
+            conn.executemany(
+                "INSERT INTO job_tags (name, keywords, sort_order) VALUES (?, ?, ?)",
+                [(name, json.dumps(keywords), i) for i, (name, keywords) in enumerate(DEFAULT_JOB_TAGS)],
+            )
+        # Backfill for installs that seeded job_tags before sort_order
+        # existed -- defaults to id, preserving whatever order those rows
+        # already had (classify_job() used id order before this column).
+        conn.execute("UPDATE job_tags SET sort_order = id WHERE sort_order IS NULL")
         conn.commit()
         _check_foreign_key_integrity(conn)
     finally:

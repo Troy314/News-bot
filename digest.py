@@ -7,6 +7,7 @@ Discord command, the daily @everyone Discord post, and the newsletter email.
 """
 
 import html
+import mimetypes
 from collections import OrderedDict
 from datetime import datetime, timezone
 
@@ -298,3 +299,100 @@ def render_digest_html(articles: list[Article], page_title: str = "Particle Phys
         chips=render_chips(articles, hues),
         sections=sections,
     )
+
+
+RSS_ITEM_CAP = 100
+
+
+def _rss_image_mime(image_url: str) -> str:
+    guessed, _ = mimetypes.guess_type(image_url)
+    return guessed if guessed and guessed.startswith("image/") else "image/jpeg"
+
+
+def render_rss_feed(articles: list[Article], title: str, link: str, description: str) -> str:
+    """A single aggregated RSS 2.0 feed combining every source this app
+    scrapes -- "the cumulative feed of all the feeds": one subscription in
+    an ordinary RSS reader instead of following each source individually.
+    Plain string templating (matching render_digest_html's own convention
+    above), not xml.etree -- a static RSS document has no real need for a
+    DOM-building API, same minimal-dependency preference as the rest of
+    this app.
+
+    Capped at RSS_ITEM_CAP (100) most-recent articles, not literally every
+    row ever scraped -- an RSS reader only cares about what's new/recent,
+    and an unbounded feed would just make every refresh slower for no
+    benefit. `articles` is expected pre-sorted newest-first (get_articles()
+    already returns it that way) and pre-filtered to whatever the caller
+    wants included (this function doesn't itself care about category,
+    archived status, etc.).
+
+    Each item carries its image two different ways, since RSS readers
+    don't agree on which one they honor: `<enclosure>` (the RSS 2.0 spec's
+    own mechanism) and `<media:thumbnail>` (the Media RSS extension --
+    this app already *reads* `media:thumbnail` from other feeds in
+    scraper.extract_rss_image, so writing the same tag out is the most
+    broadly-supported choice) both point at the same URL, plus the image
+    is embedded a *third* time as a literal `<img>` inside `<description>`
+    for readers that only ever render what's in the description body.
+    `length="0"` on `<enclosure>` (the byte-size attribute RSS technically
+    wants) is a deliberate placeholder, not a bug -- getting the real size
+    would mean an extra fetch per image per feed request, and every reader
+    this was checked against ignores the value anyway.
+
+    **Security note on `<description>`'s embedded HTML**: no `<![CDATA[]]>`
+    is used anywhere in this feed, specifically to avoid CDATA-injection --
+    if any scraped title/excerpt ever contained the literal sequence
+    `]]>`, a CDATA section would end early and everything after it would
+    be interpreted as raw, unescaped XML by the reader, a real injection
+    vector into other readers' rendering of this feed. Instead this builds
+    the inner HTML fragment with `html.escape()` on every embedded value
+    (image URL, excerpt text) *first*, then `html.escape()`s that entire
+    resulting HTML string *again* before placing it as the `<description>`
+    element's own XML text content -- correct, not a double-escaping bug:
+    an RSS reader XML-unescapes an element's text content exactly once,
+    which must yield back well-formed (already HTML-escaped) HTML, which
+    is what the *first* escape pass produced. Skipping either pass would
+    let scraped content break out of its intended context -- the first
+    protects the inner HTML's own structure, the second protects the
+    surrounding XML document."""
+    now = datetime.now(timezone.utc)
+    items = []
+    for a in articles[:RSS_ITEM_CAP]:
+        pub_date = a.pub_date or now
+
+        enclosure = ""
+        media_thumbnail = ""
+        img_html = ""
+        if a.image_url:
+            safe_image_url = html.escape(a.image_url)
+            enclosure = f'\n      <enclosure url="{safe_image_url}" type="{_rss_image_mime(a.image_url)}" length="0" />'
+            media_thumbnail = f'\n      <media:thumbnail url="{safe_image_url}" />'
+            img_html = f'<img src="{safe_image_url}" alt="" />'
+
+        excerpt_html = f"<p>{html.escape(a.excerpt)}</p>" if a.excerpt else ""
+        description_html = img_html + excerpt_html
+        description_field = (
+            f"\n      <description>{html.escape(description_html)}</description>" if description_html else ""
+        )
+
+        items.append(f"""
+    <item>
+      <title>{html.escape(a.title)}</title>
+      <link>{html.escape(a.link)}</link>
+      <guid isPermaLink="true">{html.escape(a.link)}</guid>
+      <pubDate>{pub_date.astimezone(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")}</pubDate>
+      <source>{html.escape(a.source_name)}</source>
+      <category>{html.escape(a.content_tag or "")}</category>{description_field}{enclosure}{media_thumbnail}
+    </item>""")
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>{html.escape(title)}</title>
+    <link>{html.escape(link)}</link>
+    <description>{html.escape(description)}</description>
+    <language>en</language>
+    <lastBuildDate>{now.strftime("%a, %d %b %Y %H:%M:%S +0000")}</lastBuildDate>{"".join(items)}
+  </channel>
+</rss>
+"""

@@ -11,6 +11,7 @@
     <h1>News Bot</h1>
     <button class="tab-btn active" data-view="feed">Feed</button>
     <button class="tab-btn" data-view="favorites">Favorites</button>
+    <button class="tab-btn" data-view="jobs">Jobs</button>
     <button class="tab-btn" data-view="sources">Sources</button>
     <button class="tab-btn" data-view="settings">Settings</button>
   </header>
@@ -28,9 +29,13 @@
           <button class="view-toggle-btn" data-size="large" title="Large cards">L</button>
         </div>
         <a class="btn" href="/api/digest.html" target="_blank">Download full digest</a>
+        <a class="btn" href="/api/feed.xml" target="_blank" title="Subscribe in any RSS reader">📡 RSS feed</a>
       </div>
-      <div id="feed-chips" class="chips"></div>
-      <div id="feed-tag-chips" class="chips"></div>
+      <details id="feed-filters" class="filter-menu">
+        <summary><span class="chevron">&#9656;</span> Filters</summary>
+        <div id="feed-chips" class="chips"></div>
+        <div id="feed-tag-chips" class="chips"></div>
+      </details>
       <div id="feed-days"></div>
       <div id="feed-empty" class="empty-state" style="display:none">No articles yet — click "Check for news now" or wait for the daily run.</div>
       <div id="feed-no-match" class="empty-state" style="display:none">No articles match the selected filters.</div>
@@ -49,6 +54,42 @@
           <div id="favorites-grid" class="grid"></div>
           <div id="favorites-empty" class="empty-state" style="display:none">No favorites in this folder yet — star an article from the Feed tab.</div>
         </div>
+      </div>
+    </section>
+
+    <!-- JOBS -->
+    <section id="view-jobs" class="view">
+      <div class="toolbar">
+        <button id="job-run-now-btn">Check for jobs now</button>
+        <span id="job-run-now-status" class="hint"></span>
+        <div class="spacer"></div>
+        <div class="view-toggle" id="job-view-toggle">
+          <button class="view-toggle-btn active" data-view="list">List</button>
+          <button class="view-toggle-btn" data-view="calendar">📅 Deadlines</button>
+        </div>
+        <a class="btn" href="/api/digest.html" target="_blank">Download full digest</a>
+        <a class="btn" href="/api/feed.xml" target="_blank" title="Subscribe in any RSS reader">📡 RSS feed</a>
+      </div>
+      <details id="job-filters" class="filter-menu">
+        <summary><span class="chevron">&#9656;</span> Filters</summary>
+        <div id="job-chips" class="chips"></div>
+        <p class="hint" style="margin: 4px 0;">Click a tag below to hide/show it (opposite of the source chips above) — Fellowship, Internship, Physicist, Post-Doc, and Professorship are hidden by default.</p>
+        <div id="job-tag-chips" class="chips"></div>
+      </details>
+      <div id="job-list-view">
+        <div id="job-days"></div>
+        <div id="job-empty" class="empty-state" style="display:none">No job/thesis offers scraped yet — click "Check for jobs now" or wait for the daily run.</div>
+        <div id="job-no-match" class="empty-state" style="display:none">No offers match the selected filters.</div>
+      </div>
+      <div id="job-calendar-view" style="display:none">
+        <div class="cal-nav">
+          <button id="job-cal-today">Today</button>
+          <button id="job-cal-prev">&#8249;</button>
+          <span id="job-cal-label" class="cal-nav__label"></span>
+          <button id="job-cal-next">&#8250;</button>
+        </div>
+        <div id="job-cal-grid" class="cal-grid"></div>
+        <div id="job-cal-empty" class="empty-state" style="display:none">No job/thesis offers have a known application deadline yet.</div>
       </div>
     </section>
 
@@ -73,6 +114,8 @@
       <div id="newsletter-sources"></div>
       <h3>Social Media</h3>
       <div id="social-sources"></div>
+      <h3>Job/Thesis Offers</h3>
+      <div id="job-sources"></div>
     </section>
 
     <!-- SETTINGS -->
@@ -98,7 +141,7 @@
         <p class="hint">A schedule time change takes effect after restarting the app.</p>
       </div>
 
-      <div class="card-form">
+      <div class="card-form" style="margin-bottom: 20px;">
         <h3>Email digest subscribers</h3>
         <p class="hint" id="smtp-status"></p>
         <div class="field">
@@ -107,6 +150,23 @@
           <button id="subscribe-btn">Subscribe</button>
         </div>
         <div id="subscribers-list"></div>
+      </div>
+
+      <div class="card-form">
+        <h3>Job tags</h3>
+        <p class="hint">Job/thesis offers are auto-tagged by matching their title against each tag's keywords (first match wins, checked top to bottom). Only applies to the Jobs tab.</p>
+        <div id="job-tags-list"></div>
+        <div class="field" style="margin-top: 14px;">
+          <label>New tag name</label>
+          <input type="text" id="new-job-tag-name" placeholder="e.g. Postdoc" style="width: 200px">
+        </div>
+        <div class="field">
+          <label>Keywords (comma-separated)</label>
+          <input type="text" id="new-job-tag-keywords" placeholder="e.g. postdoc, post-doc, postdoctoral" style="width: 100%">
+        </div>
+        <button id="add-job-tag-btn" class="primary">Add tag</button>
+        <button id="retag-jobs-btn">Reapply tags to existing listings</button>
+        <span id="job-tags-status" class="hint"></span>
       </div>
     </section>
   </main>
