@@ -85,6 +85,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     if (btn.dataset.view === "jobs") loadJobs();
     if (btn.dataset.view === "sources") loadSources();
     if (btn.dataset.view === "settings") loadSettings();
+    if (btn.dataset.view === "debug") loadDebug();
   });
 });
 
@@ -1378,6 +1379,78 @@ document.getElementById("subscribe-btn").addEventListener("click", async () => {
     alert(e.message);
   }
 });
+
+// -------------------------------------------------------------------------
+// Debug -- "is the daily job actually going to run, and did it last time",
+// without SSHing in. Built after a real incident: a manually-run process
+// (not under systemd) died silently overnight when its SSH session dropped,
+// and there was no record anywhere of what happened. Reads GET /api/debug,
+// which reports live off the running Discord bot / scheduler objects, not
+// just DB state -- see that route's docstring in web.py for why.
+// -------------------------------------------------------------------------
+
+function formatDuration(seconds) {
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+}
+
+function debugRow(label, value) {
+  return `<div class="source-row"><span class="name">${escapeHtml(label)}</span><span class="meta">${value}</span></div>`;
+}
+
+async function loadDebug() {
+  const status = document.getElementById("debug-status");
+  status.textContent = "Loading…";
+  let d;
+  try {
+    d = await api("/api/debug");
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+    return;
+  }
+  status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+
+  document.getElementById("debug-process").innerHTML =
+    debugRow("Server time (UTC)", escapeHtml(d.server_time_utc)) +
+    debugRow("Started", `${escapeHtml(fullDate(d.process_started_at))} (up ${formatDuration(d.process_uptime_seconds)})`);
+
+  const disc = d.discord;
+  document.getElementById("debug-discord").innerHTML =
+    debugRow("Token configured", disc.token_configured ? "✅ Yes" : "🔴 No -- DISCORD_TOKEN missing from .env") +
+    debugRow("Gateway connected", disc.gateway_ready ? `✅ Yes, as ${escapeHtml(disc.user)}` : "🔴 No -- on_ready() never fired, nothing is scheduled") +
+    (disc.gateway_ready ? debugRow("Latency", disc.latency_ms != null ? `${disc.latency_ms} ms` : "unknown") : "") +
+    (disc.gateway_ready ? debugRow("Guilds", disc.guild_count) : "") +
+    debugRow("News channel ID", disc.news_channel_id || "(not set)");
+
+  const sch = d.scheduler;
+  document.getElementById("debug-scheduler").innerHTML =
+    debugRow("Configured time", `${String(sch.configured_hour).padStart(2, "0")}:${String(sch.configured_minute).padStart(2, "0")} ${escapeHtml(sch.configured_timezone)}`) +
+    debugRow("Loop running", sch.loop_running ? "✅ Yes" : "🔴 No") +
+    debugRow("Iterations so far", sch.loop_iterations_so_far) +
+    debugRow("Next scheduled run", sch.next_scheduled_run ? escapeHtml(fullDate(sch.next_scheduled_run)) : "unknown") +
+    debugRow("Last digest run date", sch.last_digest_run_date ? escapeHtml(sch.last_digest_run_date) : "never recorded") +
+    '<p class="hint">"Configured time" reflects Settings right now -- if it was changed without a restart since, the loop above is still running on the older time.</p>';
+
+  const art = d.articles;
+  document.getElementById("debug-articles").innerHTML =
+    debugRow("Total articles", art.total_count) +
+    (art.latest
+      ? debugRow("Most recently scraped", `${escapeHtml(art.latest.title)} (${escapeHtml(timeAgo(art.latest.first_seen_at))})`)
+      : debugRow("Most recently scraped", "none yet"));
+
+  document.getElementById("debug-sources").innerHTML = d.sources.length
+    ? d.sources.map((s) => `
+        <div class="source-row ${s.enabled ? "" : "disabled"}">
+          <span class="name">${escapeHtml(s.name)}</span>
+          <span class="meta">${escapeHtml(s.category)}${s.enabled ? "" : " · disabled"}</span>
+          ${renderHealthBadge(s)}
+        </div>`).join("")
+    : '<p class="hint">No sources configured.</p>';
+}
+
+document.getElementById("debug-refresh-btn").addEventListener("click", loadDebug);
 
 // -------------------------------------------------------------------------
 // Feed card size (Small/Medium/Large, persisted)

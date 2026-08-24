@@ -29,6 +29,11 @@ app = FastAPI(title="News Bot")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+# Captured at import time -- web.py is imported exactly once per process
+# (from main.py), so this is a reliable process-uptime baseline for the
+# Debug tab below.
+PROCESS_STARTED_AT = datetime.now(timezone.utc)
+
 
 # --------------------------------------------------------------------------
 # Pydantic request bodies
@@ -721,6 +726,85 @@ def download_rss_feed(request: Request):
         description="Aggregated feed of every source configured in News Bot.",
     )
     return Response(content=xml, media_type="application/rss+xml")
+
+
+# --------------------------------------------------------------------------
+# Debug
+# --------------------------------------------------------------------------
+
+@app.get("/api/debug")
+def debug_info():
+    """Everything needed to answer "is the daily job actually going to run,
+    and did it last time" without SSHing in and grepping journalctl -- built
+    after a real incident where a manually-run (non-systemd) process died
+    silently overnight (SSH session dropped, taking a `Ctrl+Z`+`bg`'d
+    `python main.py` down with it via SIGHUP) and there was no record
+    anywhere of what happened or didn't.
+
+    Deliberately reads live off the running process's own objects
+    (discord_bot.bot, scheduler.daily_digest_task) rather than only DB
+    state, since the DB alone can't tell "the loop never started" apart
+    from "it started and is just waiting for tonight" -- both look
+    identical in the sources/settings tables alone.
+    """
+    import scheduler  # lazy: same reasoning as run_now(), avoids importing discord_bot at module load
+    import discord_bot
+
+    bot = discord_bot.bot
+    task = scheduler.daily_digest_task
+
+    conn = db.get_conn()
+    try:
+        # Never-checked sources first, then oldest-checked next -- surfaces
+        # staleness at a glance (see the Debug tab's own explanatory hint).
+        sources = conn.execute(
+            "SELECT id, name, category, enabled, last_checked_at, last_status, last_error "
+            "FROM sources ORDER BY (last_checked_at IS NULL) DESC, last_checked_at ASC, name"
+        ).fetchall()
+        article_count = conn.execute("SELECT COUNT(*) AS n FROM articles").fetchone()["n"]
+        latest_article = conn.execute(
+            "SELECT title, pub_date, first_seen_at FROM articles ORDER BY first_seen_at DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    now = datetime.now(timezone.utc)
+    # bot.latency is float('nan') before the gateway heartbeat has ever
+    # completed a round trip -- NaN != NaN is the standard Python idiom for
+    # detecting it, since math.isnan() would need an extra import here.
+    latency_ms = round(bot.latency * 1000, 1) if bot.latency == bot.latency else None
+
+    return {
+        "server_time_utc": now.isoformat(),
+        "process_started_at": PROCESS_STARTED_AT.isoformat(),
+        "process_uptime_seconds": (now - PROCESS_STARTED_AT).total_seconds(),
+        "discord": {
+            "token_configured": bool(discord_bot.DISCORD_TOKEN),
+            "gateway_ready": bot.is_ready(),
+            "user": str(bot.user) if bot.user else None,
+            "latency_ms": latency_ms,
+            "guild_count": len(bot.guilds) if bot.is_ready() else None,
+            "news_channel_id": discord_bot.get_news_channel_id(),
+        },
+        "scheduler": {
+            # What Settings currently holds -- may differ from what the
+            # running loop below was actually scheduled with, if the time
+            # was changed via the web UI without a restart since (see
+            # scheduler.py's daily_digest_task comment).
+            "configured_hour": int(db.get_setting("digest_hour", "8")),
+            "configured_minute": int(db.get_setting("digest_minute", "0")),
+            "configured_timezone": db.get_setting("digest_timezone", "Europe/Paris"),
+            "loop_running": task.is_running(),
+            "loop_iterations_so_far": task.current_loop,
+            "next_scheduled_run": task.next_iteration.isoformat() if task.next_iteration else None,
+            "last_digest_run_date": db.get_setting("last_digest_run_date"),
+        },
+        "sources": [dict(s) for s in sources],
+        "articles": {
+            "total_count": article_count,
+            "latest": dict(latest_article) if latest_article else None,
+        },
+    }
 
 
 # --------------------------------------------------------------------------

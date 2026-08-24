@@ -14,6 +14,7 @@
     <button class="tab-btn" data-view="jobs">Jobs</button>
     <button class="tab-btn" data-view="sources">Sources</button>
     <button class="tab-btn" data-view="settings">Settings</button>
+    <button class="tab-btn" data-view="debug">Debug</button>
   </header>
 
   <main>
@@ -167,6 +168,40 @@
         <button id="add-job-tag-btn" class="primary">Add tag</button>
         <button id="retag-jobs-btn">Reapply tags to existing listings</button>
         <span id="job-tags-status" class="hint"></span>
+      </div>
+    </section>
+
+    <!-- DEBUG -->
+    <section id="view-debug" class="view">
+      <div class="toolbar">
+        <button id="debug-refresh-btn">Refresh</button>
+        <span id="debug-status" class="hint"></span>
+      </div>
+
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Process</h3>
+        <div id="debug-process"></div>
+      </div>
+
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Discord bot</h3>
+        <div id="debug-discord"></div>
+      </div>
+
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Daily digest scheduler</h3>
+        <div id="debug-scheduler"></div>
+      </div>
+
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Articles</h3>
+        <div id="debug-articles"></div>
+      </div>
+
+      <div class="card-form">
+        <h3>Latest scraping, per source</h3>
+        <p class="hint">Sources with the oldest (or no) check are listed first -- if the whole list shows "Not checked yet" or a check from days ago, the scheduler likely never ran, not just this one source.</p>
+        <div id="debug-sources"></div>
       </div>
     </section>
   </main>
