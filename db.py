@@ -21,7 +21,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('rss', 'css')),
+    kind TEXT NOT NULL CHECK(kind IN ('rss', 'css', 'email', 'inspirehep', 'doctorat_gouv')),
     category TEXT NOT NULL DEFAULT 'website' CHECK(category IN ('website', 'newsletter', 'social', 'job')),
     url TEXT NOT NULL,
     article_selector TEXT,
@@ -87,6 +87,31 @@ CREATE TABLE IF NOT EXISTS job_tags (
     name TEXT UNIQUE NOT NULL,
     keywords TEXT NOT NULL DEFAULT '[]',
     sort_order INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Indeed "pagead" (sponsored) job links carry no stable job id at all --
+-- every param, including the long ad= token, differs per email even for
+-- the exact same posting, unlike a real jk= link (see
+-- email_import._normalize_indeed_link). So a same-titled pagead import
+-- can't be safely auto-deduped by link the way everything else in this
+-- app is -- it's staged here instead, for the user to manually decide
+-- "same job, discard" vs "coincidentally the same title, keep both".
+-- `status` (not a delete-on-resolve) matters specifically because
+-- fetch_indeed_jobs() re-reads *every* message on every run, by design
+-- (see its own docstring) -- a discarded row still needs to permanently
+-- block the identical link from being re-staged on the next scan, the
+-- same way an already-created `articles` row already blocks re-import via
+-- its own UNIQUE(link) forever. Deleting the row on resolve would lose
+-- that memory and re-surface the same "possible duplicate" every day.
+CREATE TABLE IF NOT EXISTS pending_indeed_duplicates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    link TEXT NOT NULL UNIQUE,
+    pub_date TEXT,
+    matched_article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'imported', 'discarded')),
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -156,6 +181,20 @@ COLUMN_MIGRATIONS = [
     ("sources", "forced_job_tag", "TEXT"),
     ("articles", "archived", "INTEGER NOT NULL DEFAULT 0"),
     ("articles", "excerpt", "TEXT"),
+    ("sources", "title_filter", "TEXT"),
+    ("sources", "paginate", "INTEGER NOT NULL DEFAULT 0"),
+    ("sources", "logo_url", "TEXT"),
+    ("articles", "remuneration", "TEXT"),
+    ("articles", "saved_text", "TEXT"),
+    ("sources", "location_selector", "TEXT"),
+    ("articles", "city", "TEXT"),
+    ("articles", "hidden", "INTEGER NOT NULL DEFAULT 0"),
+    # JSON list of user-chosen topic tags. NULL = never manually edited, so the
+    # auto-classified job_tag applies; a list (even "[]") is the explicit set.
+    ("articles", "job_tags", "TEXT"),
+    # JSON list of free-form subject topics on a job, separate from job_tags
+    # (job type). NULL and [] both mean "none"; nothing auto-fills it.
+    ("articles", "topics", "TEXT"),
 ]
 
 
@@ -199,6 +238,26 @@ def _recreate_sources_table(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = OFF")
     conn.execute("ALTER TABLE sources RENAME TO sources_old")
     conn.executescript(SCHEMA)  # recreates `sources` under the current (new) constraint
+    # A SECOND BUG THIS ONCE HAD, hit for real in production: the fresh
+    # `sources` this just created only has the columns *literally written*
+    # in the SCHEMA constant's CREATE TABLE text -- every column that only
+    # ever existed via a COLUMN_MIGRATIONS ALTER TABLE (title_filter,
+    # paginate, group_tag, ...) is missing from it. The INSERT...SELECT
+    # below builds its column list from `sources_old` (which has every
+    # migrated column, since ALTER TABLE was already applied to it before
+    # this function ever ran) -- so it tried to insert into columns that
+    # didn't exist yet on the brand-new table, raised, and aborted *before*
+    # DROP TABLE sources_old. The fresh `sources` was left empty; the next
+    # startup's seed_sources.seed() then happily filled that empty table
+    # with its 20 defaults (matched by name, nothing to conflict with), and
+    # every real article's source_id was left pointing at a source that no
+    # longer existed -- 454 foreign-key violations, caught by
+    # _check_foreign_key_integrity, not by anything that stopped it
+    # happening. `_ensure_columns` here, before the copy, is what makes
+    # this table's shape match sources_old's regardless of whether SCHEMA's
+    # own literal text has been kept in sync -- don't remove it as
+    # "redundant" just because SCHEMA usually already has every column.
+    _ensure_columns(conn)
     columns = [r["name"] for r in conn.execute("PRAGMA table_info(sources_old)")]
     column_list = ", ".join(columns)
     conn.execute(f"INSERT INTO sources ({column_list}) SELECT {column_list} FROM sources_old")
@@ -234,6 +293,53 @@ def _ensure_job_category(conn: sqlite3.Connection) -> None:
     _recreate_sources_table(conn)
 
 
+def _ensure_email_kind(conn: sqlite3.Connection) -> None:
+    """Same migration shape as _ensure_social_category/_ensure_job_category
+    (see _recreate_sources_table's docstring for the mechanics), now for
+    sources.kind gaining an 'email' value -- IMAP-fetched sources (Indeed
+    job-alert emails; see email_import.py) alongside 'rss'/'css'. Run after
+    the category migrations so a DB that's never seen any of these three
+    only pays for one rename-recreate-copy (the fresh CREATE TABLE already
+    has all three), not three separate ones."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
+    if row is None or "'email'" in row["sql"]:
+        return
+    _recreate_sources_table(conn)
+
+
+def _ensure_inspirehep_kind(conn: sqlite3.Connection) -> None:
+    """Same migration shape as _ensure_email_kind, now for sources.kind
+    gaining an 'inspirehep' value (see scraper.scrape_inspirehep). Run
+    after it so a fresh-enough DB (already has 'email') only pays for one
+    more rename-recreate-copy, not a second one for the same reason."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
+    if row is None or "'inspirehep'" in row["sql"]:
+        return
+    _recreate_sources_table(conn)
+
+
+def _ensure_doctorat_gouv_kind(conn: sqlite3.Connection) -> None:
+    """Same migration shape as _ensure_inspirehep_kind, now for
+    sources.kind gaining a 'doctorat_gouv' value (see
+    scraper.scrape_doctorat_gouv, the Plateforme Nationale du Doctorat
+    per-laboratory PhD-subject import). Run after it so a fresh-enough DB
+    (already has 'inspirehep') only pays for one more rename-recreate-copy,
+    not a second one for the same reason. This migration shipped once
+    already with a real-world gotcha: POSTing a source with
+    kind="doctorat_gouv" before this ran fails the CHECK constraint, which
+    SQLite reports as a plain IntegrityError -- and web.py's
+    create_source() catches *any* IntegrityError on that insert and reports
+    it as `"A source named '...' already exists"`, a 409 that has nothing
+    to do with the real cause. If a source create 409s with a name you know
+    isn't taken yet, check this migration actually ran (the stored
+    `sources` schema text contains `'doctorat_gouv'`) before assuming the
+    name really collided."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
+    if row is None or "'doctorat_gouv'" in row["sql"]:
+        return
+    _recreate_sources_table(conn)
+
+
 def _check_foreign_key_integrity(conn: sqlite3.Connection) -> None:
     """Startup safety net, cheap to run every time: `PRAGMA foreign_key_check`
     catches a foreign key referencing a table that no longer exists (not
@@ -264,6 +370,9 @@ def init_db() -> None:
         _ensure_columns(conn)
         _ensure_social_category(conn)
         _ensure_job_category(conn)
+        _ensure_email_kind(conn)
+        _ensure_inspirehep_kind(conn)
+        _ensure_doctorat_gouv_kind(conn)
         conn.commit()
         existing = {row["key"] for row in conn.execute("SELECT key FROM settings")}
         for key, value in DEFAULT_SETTINGS.items():

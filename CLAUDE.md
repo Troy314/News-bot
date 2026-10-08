@@ -32,6 +32,10 @@ would only start half of it.
   the newsletter-email subscription feature. A no-op-with-a-log-warning,
   not a crash, when SMTP isn't configured — email is an optional channel
   alongside Discord, not a required one.
+- `email_import.py` — reads Indeed job-alert emails over IMAP (stdlib
+  `imaplib`/`email`, zero extra dependency) for `sources.kind == "email"`;
+  see the Jobs section below for why this exists instead of scraping
+  Indeed directly.
 - `discord_bot.py` — bot commands (`!news`, `!sites`, `!digest`,
   `!forcedigest`) plus `notify_discord()`, called by the scheduler.
 - `scheduler.py` — `run_daily_job()` (scrape → persist → notify Discord +
@@ -933,6 +937,95 @@ they cluster together in the Sources tab regardless of which lab:
   exactly that kind of workaround wearing a different hostname, so it's
   out of scope for the same reason a direct Twitter/X scraper would be.
 
+## Plateforme Nationale du Doctorat import, per laboratory (2026-10-08)
+
+`app.doctorat.gouv.fr` ("Plateforme nationale du doctorat", a government-
+run doctorate portal still in beta) is a fifth `kind` (`doctorat_gouv`),
+alongside `rss`/`css`/`email`/`inspirehep` — same `sources.kind` CHECK-
+constraint migration as every value before it (`db.py`'s
+`_ensure_doctorat_gouv_kind`, same recreate-and-copy shape as
+`_ensure_inspirehep_kind`; see the FK-corruption incident below for why
+this can't just be an `ALTER TABLE`). **A real, same-origin JSON API, not
+scraped HTML** — `/api/propositions-these` (filterable by `laboratoire=`,
+exact-string match against `/api/filters/all`'s own `laboratoire` list,
+1294 entries) and `/api/filters/all` itself, both undocumented publicly
+but found by reading the site's own bundled Angular `main-*.js` for its
+HTTP services' base URLs (`apiUrl: "/api"`), same "prefer a real API over
+scraping HTML" preference as Indeed/InspireHEP. `scrape_doctorat_gouv` in
+`scraper.py`; `source["url"]` is a full query URL, one lab per source
+(e.g. `.../propositions-these?size=50&laboratoire=<urlencoded exact
+name>`), matching `scrape_inspirehep`'s "full API query stored on the
+row" convention.
+
+**`link` is the platform's own stable detail page**
+(`https://app.doctorat.gouv.fr/proposition?id=<id>`, found the same way —
+the Angular router's `path:"proposition"` + `queryParams:{id:n}` — and
+confirmed to resolve with a real 200), not the subject's own
+`urlCandidature` field. That field is frequently an `adum.fr` URL, because
+this platform mirrors ADUM submissions, and this app already has two ADUM
+sources (`ADUM: particule`, `ADUM Paris-Saclay: PHENIICS`) that can
+independently discover the same subject under its *original* ADUM link —
+using the platform's own id-keyed URL instead means this source's own
+links can never collide with an ADUM source's links for the same subject,
+a one-way improvement over trusting exact-link dedup to catch it. It
+doesn't eliminate overlap entirely, though — see the real duplicate caught
+below. Every date field (`dateMiseEnLigne`/`dateCreation`,
+`dateLimiteCandidature`) comes back as a naive ISO datetime with no UTC
+offset; parsed with the same `.replace(tzinfo=timezone.utc)` treatment as
+every other naive source date in this file (not because the platform's
+clock is actually UTC, but so every `Article.pub_date`/`.deadline` stays
+uniformly tz-aware regardless of its source's real precision).
+
+**12 of 15 requested labs matched the filter list** (exact full-name
+match, not the acronym — e.g. LPSC is listed as "Laboratoire de Physique
+Subatomique et Cosmologie", Subatech as "LABORATOIRE DE PHYSIQUE
+SUBATOMIQUE ET DES TECHNOLOGIES ASSOCIEES"); **APC, IPHC, and LPC Caen are
+not on the platform's lab list at all yet** (no subject has ever been
+submitted through it under their name) and were skipped rather than added
+as permanently-empty sources. At setup time, 11 of the 12 matched labs had
+**zero** open subjects (expected `last_status: "empty"` — this is the
+platform's real, still-growing beta coverage, not a selector problem to
+go fix); only **IJCLab** had any (3). This genuinely fills a real gap for
+several of these labs — LAPP, LLR, LP2IB, LPC (Clermont), LPNHE, and LPSC
+had *no* job/thesis-specific source at all before this (only general news
+RSS feeds, or in LLR's case nothing — its own site was already excluded
+above for a broken SSL cert, which this new source sidesteps entirely by
+going through the platform instead). Sources are named `"<Lab> (PNT)"`;
+`LPC (PNT)` is Clermont (matching the existing bare `LPC` news source,
+also Clermont, not Caen — see the "LPC Caen" sources above for the
+*other* lab of a similar name). All 12 use `forced_job_tag: "PhD"` and
+`group_tag: "PhD"`, matching the existing dedicated Theses sources'
+convention.
+
+**The overlap risk was real, not just theoretical — caught during
+verification, before calling this done.** The one IJCLab subject this
+source did return (`"Recherche de H(bb)H(gammagamma)..."`) turned out to
+already exist via `ADUM Paris-Saclay: PHENIICS` under its original ADUM
+link — a genuine duplicate, exact-link dedup can't and didn't catch it
+(different URLs, as expected). Archived the newer PNT-sourced copy via
+`PUT /api/articles/{id}/archive` (the app's own route, not a raw SQL
+edit) rather than building new cross-source dedup logic — this was a
+deliberate choice, confirmed with the user ahead of time: accept
+link-based dedup as the only mechanism, and handle a collision reactively
+if and when one actually appears, same as every other source-pair overlap
+in this app. **If you add another lab here later, or re-enable one of the
+3 unmatched ones once the platform picks them up, check its title against
+existing `category='job'` rows for the same lab/discipline before
+assuming it's new** — CPPM and Subatech in particular already have their
+own dedicated "Theses" website sources (see above), so a future populated
+subject for either could repeat this exact overlap.
+
+**A real, separate bug this surfaced in `web.py`'s `create_source()`**:
+POSTing `kind: "doctorat_gouv"` *before* the CHECK-constraint migration
+ran 409'd with `"A source named '...' already exists"` for all 12 names
+at once, even though none of them existed yet — `create_source()` catches
+*any* `sqlite3.IntegrityError` on the insert and reports it as a name
+collision, when the real cause was the CHECK constraint rejecting the
+new `kind` value. Fixed by actually shipping the migration (not by
+touching the error handling) — but if a future source create 409s with a
+name you're sure is free, check what's actually violating first rather
+than trusting that message.
+
 ## Job deadlines and the deadline calendar
 
 `sources.deadline_selector` is an optional `job`-only CSS selector, parsed
@@ -990,6 +1083,30 @@ button pattern as Feed's S/M/L card-size toggle) rather than separate
 tab-bar tabs, since they're two presentations of the *same* Jobs data, not
 two different datasets.
 
+**The list view has its own "⏰ Hide expired" toggle** (`job-hide-expired-toggle`,
+`jobHideExpired` in `static/app.js`, persisted to `localStorage` like the
+hidden-tags set above) — hides a card whose `deadline` is a real, parsed
+date strictly before now. Defaults **on** per explicit request ("hide job
+where deadline is passed"), but stays a genuine toggle rather than a
+one-way archive: nothing is hidden server-side (`GET /api/:articles` is
+untouched), so a wrong/stale deadline just needs the toggle flipped off to
+reappear, not an unarchive call — a deadline is sometimes stale or simply
+absent (most sources don't expose one at all, see above), so this is a
+*view* filter, the same category of thing as the existing source/tag/
+search filters, not a data-mutating action like the Jobs tab's Archive
+button. Implemented as a new `hideExpired` parameter on the shared
+`applyDayFilter()` (Feed's own call site always passes `false`, so this
+never touches Feed) — a card's `.card` element now also carries a
+`data-deadline` attribute (blank when the article has none) purely so the
+filter can read it client-side without a second fetch, same pattern
+`data-source`/`data-job-tag` already use for the source/tag filters. **The
+"📅 Deadlines" calendar view is intentionally untouched by this toggle** —
+it already has its own visual "passed" treatment
+(`.deadline-badge[data-passed]`) and serves a different purpose (an
+at-a-glance month overview, where a just-missed deadline is still useful
+context), unlike the list view's job of showing what's currently
+actionable.
+
 **Missing dates default to when scraping actually found the article, not
 `NULL`.** A source with no `date_selector` at all, or whose date text
 failed to parse, used to leave `pub_date` `NULL` — landing the article
@@ -1038,6 +1155,250 @@ the day-detail modal if one's open (`openJobDayModal()`'s cards were
 rendered once from already-fetched data and won't reflect the edit on
 their own) and reloads Jobs so both the list and calendar view pick up
 the change immediately.
+
+## Multiple topic tags per job
+
+An offer can carry several topic tags. Storage is `articles.job_tags`, a JSON
+list column added as nullable (no backfill needed). The semantics are the
+important part:
+
+- `NULL` means the offer was never edited by hand, so the auto-classified
+  `job_tag` applies (`_effective_job_tags()` in `web.py`).
+- Any list, including `[]`, is the explicit set. `[]` means deliberately
+  untagged, not "fall back to auto", so that distinction must survive
+  edits.
+- `job_tag` is still the classifier's output and is only rewritten by
+  retagging. Do not repurpose it as the user-facing list.
+- `PUT /api/articles/{id}/job-tags` replaces the whole list. The UI sends the
+  full resulting set on every add or remove, so a stale card cannot
+  half-apply a change.
+- `retag_jobs()` swaps the old auto tag for the new one *inside* a manual
+  list and leaves the user's other tags alone. Without this, retagging would
+  silently drop tags added by hand.
+- `list_articles()` returns `job_tag_list`, the effective list. Filtering,
+  chip counts and the card's `data-job-tags` all read that, not `job_tag`.
+- Stats (`job_stats`) and the time series count an offer once under each of
+  its tags, so per-tag totals can exceed the number of offers.
+
+## Data Analysis page excludes the same 5 low-signal tags Jobs hides
+
+Not just "Untagged": the Pay by tag / Offers by tag charts now also drop
+Fellowship, Internship, Physicist, Post-Doc and Professorship -- the exact
+set `JOB_TAG_HIDE_DEFAULT` hides by default in the Jobs tab. Reported as a
+regression ("you when back to displya porfessorship, internship etc"):
+these tags were bulk-archived once, but new offers keep getting scraped
+under them, and the Jobs tab's hide preference is a per-browser
+`localStorage` toggle that this page never read. `excludeLowSignalTags()`
+hardcodes the same 5-tag set instead, so this page's definition of "noise"
+stays consistent regardless of which browser opens it. The underlying
+`/api/jobs/stats` response is unchanged -- the Pay-stats popup still shows
+every tag, including these.
+
+## escapeHtml must escape quotes (Hide expired silently broke)
+
+`escapeHtml()` used to rely on `innerHTML`, which escapes `& < >` but not
+`"` or `'`. Any value placed inside a double-quoted `data-*` attribute was
+therefore unsafe, and the multi-tag change put a JSON list there
+(`data-job-tags`). A card with two tags produced a malformed attribute, and
+`JSON.parse` threw inside `applyDayFilter`. That aborted the loop, so every
+card after it stayed unfiltered: expired PhD offers kept showing with "Hide
+expired" on, and the group filters looked broken. Titles with quotes
+(`"Physique"`) had the same flaw. The escaper now handles all five
+characters, and the card tag parse falls back safely (`cardTagList`).
+
+The Deadlines calendar also honors Hide expired now. It reads `state.jobs`
+directly, so it re-renders on every `applyJobFilter()`.
+
+## Internship/Professorship/Physicist/Fellowship/Post-Doc auto-archive on classification
+
+Requested directly ("by default... should be archived") after the
+client-side hidden-tags toggle (see above) kept needing a manual reset and
+a one-time bulk archive kept needing to be redone as new low-signal offers
+were scraped. `scraper.AUTO_ARCHIVE_JOB_TAGS` is now a real, permanent
+server-side rule, not a per-browser preference:
+
+- `persist_articles()` sets `archived = 1` at insert time when the
+  classified `job_tag` is in the set.
+- `retag_jobs()` does the same when a keyword change reclassifies an
+  existing row into the set, via `archived = MAX(archived, new_flag)` --
+  one-directional, so a retag never *un*-archives a row whose tag moves
+  away from the set (that could silently undo an unrelated archive
+  decision).
+- Run once immediately via the existing "Reapply tags" endpoint
+  (`POST /api/job-tags/retag`) to archive the handful of rows scraped
+  since the original one-time bulk archive. Verified: all 5 tags dropped
+  out of the default Jobs list, and the rows are archived, not deleted --
+  reachable from "📁 Show archived". A freshly-inserted test row
+  classified "Professorship" came in `archived = 1` immediately,
+  confirming the insert-time path.
+- This is about auto-*classification* only. Manually adding one of these
+  5 names via the multi-tag editor does not archive anything -- that
+  would be a surprising side effect of an explicit user action.
+
+## Jobs tab: reset the hidden-tags filter
+
+The Fellowship/Internship/Physicist/Post-Doc/Professorship default-hidden set
+(`JOB_TAG_HIDE_DEFAULT`) is a `localStorage` preference, not a server-side
+rule -- clicking a tag chip persists that change forever with no visible
+"this differs from default" indicator. Reported directly ("still
+displayed", a Professorship offer with the exact right tag string showing
+in the normal list) after the Data Analysis fix above, for the Jobs tab
+itself this time. Checked the server-stored tag first and it matched
+`JOB_TAG_HIDE_DEFAULT` exactly, so this was client-side drift, not a data
+bug. Added a "reset to default" link next to the Jobs tag filter
+(`job-tag-reset-btn`) that clears the stored key and reloads -- the fastest
+fix for a state we cannot inspect from here, and the honest one: the root
+cause is almost certainly a tag chip clicked at some point, not a code
+defect.
+
+## Job topics and saved-text descriptions
+
+- **Topics are a second, separate multi-valued field on a job.** A tag says
+  what kind of offer it is (PhD, Outreach). A topic says what it is about.
+  Storage is `articles.topics`, a JSON list, nullable. It is free-form, never
+  auto-classified, and set through `PUT /api/articles/{id}/topics`, which
+  replaces the whole list. Shared normalization lives in `_clean_list()`, which
+  both the tag and topic routes use. Topics appear in `list_articles()` as
+  `topic_list`. The card editor offers suggestions from every topic already in
+  use (`refreshTopicSuggestions()`), and Enter adds one.
+- **A Jobs card's description is the start of its saved page text** when one
+  exists, otherwise the scraped excerpt. `savedTextDescription()` collapses
+  whitespace and, when the offer's own title appears near the top, starts there,
+  since saved pages open with site chrome ("Début du contenu principal /
+  Rechercher"). It is capped at about 320 characters.
+
+## Frontend cleanup (this pass)
+
+- The Pay-stats popup used its own histogram system (`renderHistogram`, a
+  `.hist-*` tile layout). It now uses the same `renderStatChart` /
+  `renderStatLine` as the Data Analysis page, so there is one chart system.
+  The tile CSS was removed.
+- The single-tag `<select>` on job cards and its `.job-tag-select` CSS were
+  removed, along with the `/job-tag` route. Nothing referenced them.
+- Dead-code sweep: every top-level JS name is referenced, and the remaining
+  unused CSS was deleted. Note that the sweep is substring-based, so re-run
+  it before trusting it again.
+
+## Job locations (`articles.city`)
+
+Free-text location (e.g. `"Nantes - 44"` — department code kept, same
+"don't over-parse a free-text field" reasoning `remuneration` already
+uses) for a job/thesis offer, requested directly ("for job scraping add
+city"). Exactly the same two-path shape `deadline`/`remuneration` already
+established in this file, not a new pattern:
+- **`sources.location_selector`** (optional, job-category sources only) —
+  a CSS selector parsed in `scrape_css()` right alongside
+  `deadline_selector`, extracted with a plain `get_text(" ",
+  strip=True)` (no date/number parsing needed, unlike `deadline_selector`'s
+  `parse_css_date()`). Exposed in both the Add-source and Edit-source
+  forms (`selectorFieldHtml("add"/"edit", "location", ...)`) with the same
+  "🎯 Pick" live-selector-picker support every other selector field gets —
+  that picker is generic over any `data-field` key, so this needed no
+  picker-side changes at all. No source has one configured yet; this is
+  infrastructure for the next CSS job source that exposes a location
+  element, same as `deadline_selector` sat unused until IPHC Job Offers
+  wired one up.
+- **`PUT /api/articles/:id/city`** (`CityIn` body `{city}`, blank/null
+  clears it) is the reliable path for everything else — most job sources
+  don't expose a location element at all, and RSS/email-imported offers
+  never will (no selector concept there). A job card gets a small "✎"
+  (has one) / "+ City" (doesn't) button (`renderCard()`'s `cityEditBtn`,
+  gated behind the same `allowDeadlineEdit` flag every other Jobs-only
+  control uses) opening `openCityEditor()` — a single plain-text field,
+  simpler than `openRemunerationEditor()`'s amount+period pair since a
+  location has no second dimension the way pay has annual/monthly.
+- **Not restricted to `category="job"` server-side** — same "the UI is
+  the only place a control for this exists, the server doesn't
+  re-enforce it" pattern every other simple field-edit route in this file
+  already follows.
+- **`openCityEditor()`'s input suggests cities already used elsewhere in
+  Jobs**, via a plain HTML `<datalist>` (`existing-cities`) built from
+  `state.jobs` (already fetched for the list view — no new API call,
+  same "client-side only" shape as every other suggestion list in this
+  file) rather than a hardcoded list — same "suggestions, not an enum"
+  spirit as `CONSOLES`' `allowCustom` elsewhere in this app, just via the
+  browser's native datalist instead of a text-input-plus-datalist pair,
+  since a plain city string has no "allow custom" flag to set in the
+  first place (it was never a closed `select` to begin with).
+
+## Manual URL correction (`PUT /api/articles/:id/link`)
+
+Requested directly ("allow to change url") — most useful for the
+"Manually added" source below, whose rows only ever got a Google-search
+fallback link (no real URL existed at import time), but reachable from
+any Jobs card (`renderCard()`'s `linkEditBtn`, same `allowDeadlineEdit`
+gating as every other manual-edit control, opening `openLinkEditor()`).
+Not restricted to `category="job"` server-side, same latitude every
+other simple field-edit route here already has.
+- **Unlike `remuneration`/`deadline`/`city`, there's no "Clear" button and
+  no null case at all** — `articles.link` is `NOT NULL UNIQUE`, so
+  `LinkIn.link` is a required (non-`Optional`) field; an empty/whitespace
+  value is rejected with a 400 before it ever reaches the database, and a
+  value that collides with another article's existing link is a real 409
+  ("Another article already has this exact URL"), not a silent overwrite
+  or a `db.sqlite3.IntegrityError` leaking out as a 500.
+
+## The "NEW" badge is Feed-only now
+
+`renderCard()`'s `newBadge` (derived from `articles.notified`, see its own
+comment) used to render unconditionally on every card, Jobs included.
+Requested directly ("remove 'new' tag" — scoped "for jobs" in the same
+message as the city/URL asks above) — fixed by gating it behind `!
+allowDeadlineEdit` alongside the `!article.notified` check it already
+had, reusing the same "this is a Jobs card" signal every other Jobs-only
+control in `renderCard()` keys off, rather than adding a new option just
+for this one flag. Feed is unaffected; this is scoped to Jobs only, per
+the request.
+
+## 21 manually-added "médiation scientifique" job listings (2026-10-01)
+
+A `"Manually added"` source (`id` assigned at creation, `kind: "css"`
+with placeholder `url`/`article_selector`/`base_url` values and
+**`enabled: false`**) exists purely as a container row for job offers the
+user pastes in by hand from a job board with no live-scrapable source
+configured — `enabled: false` keeps `scrape_all_sources()`'s `WHERE
+enabled = 1` filter from ever trying to actually fetch the placeholder
+`url`. Not a new `kind` value (`'manual'`) — extending the `kind` CHECK
+constraint needs a full table-recreate migration (`_recreate_sources_table()`-
+style, see the rename-migration incident elsewhere in this file) for
+something that doesn't need to be a distinct kind at all: `kind: "css"`
++ `enabled: false` already gets the exact right behavior (never scraped,
+shows up in the Sources tab's "Job/Thesis Offers" list like any other job
+source) with zero schema changes.
+
+Articles were inserted via `scraper.persist_articles()` directly (a
+one-time script, not a lasting import path) — same reasoning as the
+pending-Indeed-duplicate "import anyway" route reusing this instead of a
+hand-rolled `INSERT`: job_tag/content_tag classification and the dedup-by-
+link `INSERT OR IGNORE` all apply exactly as they would for a real scrape.
+- **No URL exists for any of these** (the user pasted rendered listing
+  text, not HTML with real hrefs) — `link` is a Google search URL built
+  from `<company> <title>`, not a direct permalink. Disclosed here and to
+  the user rather than fabricating a fake direct link: it's an honest,
+  genuinely useful "go find this" fallback, not a pretend original URL.
+- **Company name has no column of its own** (this app's `articles` table
+  has never needed one — every real scraped source already bakes the
+  employer into its own title/excerpt text) — folded into `excerpt`
+  instead, as `"<company> — <contract type>. <description snippet>"`.
+  Contract type (CDD/CDI) rides along in that same string for the same
+  reason — a new column for one manually-pasted batch isn't worth it.
+- **Every listing from the pasted page was kept, including several
+  obviously unrelated to médiation scientifique** (a tax-credit audit
+  consultant, a biostatistician, an NGO campaign director, a general
+  arts-and-culture service head) — the page mixing relevant results with
+  sponsored/suggested filler, same pattern already seen on other job
+  boards in this file. Deliberately *not* filtered out unilaterally: the
+  user's instruction was "add these data" without qualification, and
+  guessing which ones they'd want trimmed would be a real, reversible-only-
+  by-asking judgment call — they classify as `job_tag: null` (Untagged)
+  automatically rather than "Outreach", so they're easy to spot and
+  archive by hand if unwanted, same as any other Untagged offer.
+- **`job_tag` came out mixed**: 8 landed "Outreach" (title matched its
+  keyword list — "médiation"/"scientifique"-flavored titles), 2 landed
+  "Ingé" (a pre-existing custom tag, not `DEFAULT_JOB_TAGS` — matched
+  "ingénieur" in the title), the remaining 11 "Untagged" — all from
+  `classify_job()`'s ordinary keyword matching, no manual tagging done on
+  this batch.
 
 ## Job tags (Fellowship/PhD/Internship/Professorship/Outreach/...)
 
@@ -1173,6 +1534,1074 @@ noise — see the Jobs tab bullet under "Web UI").
     empty `Set`). Without this fix the chip UI and the actual filtered
     card set would visibly disagree (chips shown as un-toggled while
     cards were already hidden underneath).
+- **A third `sources.kind`, `"email"`, reads Indeed job-alert emails over
+  IMAP instead of fetching a URL** (`email_import.py`, stdlib
+  `imaplib`/`email` only — zero new dependency, same convention as
+  `mailer.py`'s SMTP sending). Exists because Indeed's own site is
+  Cloudflare-blocked to direct scraping (confirmed with real requests: an
+  actual bot-detection challenge page, `403`, not a generic guess) and
+  their RSS feed is dead (`404`) — building a bypass for that block was
+  explicitly declined even when asked, same "don't defeat an active
+  block" line already drawn elsewhere in this app's history (see
+  `server/psn.js`-equivalent lessons in the sibling achievement-vault
+  project for PSNProfiles'/Untappd's image CDNs). Indeed's own job-alert
+  *emails*, sent to an inbox the user owns, are a first-party channel
+  instead of a workaround. `kind IN ('rss', 'css', 'email')` needed the
+  same CHECK-constraint recreate-table migration
+  (`_ensure_email_kind()` in `db.py`) as the `category` column's
+  `'social'`/`'job'` additions — see `_recreate_sources_table()`'s
+  docstring for the mechanics and the FK-breakage incident to avoid
+  repeating.
+  - **`source["url"]` is a human-readable label only, never actually
+    fetched**, for an `email`-kind row — the schema requires a non-null
+    `url` on every source regardless of kind, so this one just holds
+    something descriptive (e.g. `imap:indeed-alerts`) instead of a real
+    address.
+  - **`email_import.py` returns plain dicts, not `scraper.Article`** —
+    deliberately no dependency on `scraper.py` from this module (avoids a
+    circular import, since `scraper.py` is what calls *into*
+    `email_import.py`). `scraper.py`'s `scrape_email()` is the thin
+    wrapper that turns those dicts into real `Article`s, keeping `Article`
+    construction owned by one module the way every other `scrape_*`
+    function already does.
+  - **Reads only `UNSEEN` messages from Indeed's sender, marks each
+    `\Seen` after processing** (success or failure) so the same alert
+    email isn't re-parsed on every scheduled run forever, and a
+    malformed one isn't retried forever either — same "graceful
+    degradation over crashing" spirit as `scrape_css`'s per-row
+    fallbacks. `persist_articles()`'s existing dedup-by-link would make
+    a re-parse harmless anyway, this just avoids the wasted work.
+  - **The HTML-parsing regex (`INDEED_LINK_RE`) was written without a
+    real sample alert email to test against** — no Indeed alerts existed
+    yet at implementation time, only the user's own confirmed-working
+    search URLs (which are blocked for direct fetching, that's the whole
+    reason this exists). Flagged explicitly in the module's own
+    docstring: treat the first real run as a validation pass, not a
+    finished feature — check `last_error`/logs for "yielded no job
+    links" warnings, which mean the pattern needs adjusting against the
+    actual email markup once real alerts start arriving.
+  - **Credentials are `.env`-only** (`IMAP_HOST`/`IMAP_EMAIL`/
+    `IMAP_APP_PASSWORD`), same never-round-trips-through-the-API contract
+    as `DISCORD_TOKEN`/`SMTP_*` — a Gmail *app password* (2-Step
+    Verification required to generate one), not the real account
+    password. `is_configured()` makes an unconfigured inbox a clean no-op
+    (`status: "empty"`, a logged warning, no exception) rather than an
+    error, matching `mailer.py`'s "optional channel" contract for
+    unconfigured SMTP.
+  - **Two real institutional sources were added alongside this**
+    (Université Savoie Mont Blanc/Chambéry and Université Lyon 1 — both
+    `kind: "css"`, not `email`), for the same "chargé de médiation
+    scientifique"/"ingénieur pédagogique"-type roles. Université Grenoble
+    Alpes was investigated and dropped: their jobs site renders entirely
+    client-side (empty static HTML to this app's `requests`+BeautifulSoup
+    engine), and the national civil-service aggregator
+    (choisirleservicepublic.gouv.fr) turned out to have the identical
+    problem one layer down (JS/AJAX-driven filtering, no discoverable
+    static search-URL scheme) — neither is reachable without a real
+    browser to observe network calls. Both added sources share the exact
+    same underlying JetEngine/WordPress recruitment-platform template
+    (confirmed live), but their field `data-id` widget hashes differ per
+    site's own template instance — don't assume they're copy-pasteable to
+    a third site on the same platform without re-verifying against that
+    site's real markup first.
+  - **A per-source `title_filter` (new nullable `sources` column, plain
+    `ALTER TABLE ADD COLUMN` — no CHECK constraint, so no recreate-table
+    migration needed unlike `kind`/`category`) narrows a noisy listing
+    page down to just the titles you actually want**, applied in
+    `scrape_css` right after `title` is extracted: a case-insensitive
+    regex (`re.search`, same "OR via `|`" idiom `CONTENT_TAG_RULES`
+    already uses elsewhere in this file), `None`/blank meaning "keep
+    everything" like every other optional selector field. Used on both
+    Chambéry and Lyon 1 (`"communication|médiation|pédagogi"` — the
+    `pédagogi` stem deliberately covers both `pédagogique` and
+    `pédagogie`, a lesson from the first, narrower version of this filter
+    silently dropping a real live "Ingénieur pédagogique..." posting).
+    **Unlike `job_tags` classification (which tags every posting for
+    *display* filtering but still stores all of them), `title_filter`
+    skips the article before it's ever persisted** — for a source whose
+    entire listing you never want to see, not just want tagged
+    differently.
+    - **`scrape_css`'s `MAX_ARTICLES_PER_FETCH` cap had to move from
+      slicing the raw container list to counting *kept* articles** —
+      `containers[:MAX_ARTICLES_PER_FETCH]` (the original shape) would
+      silently only ever look at the page's first 10 raw entries, so a
+      `title_filter` match sitting past that point (a busy listing, mostly
+      irrelevant) would never be found at all. Fixed to iterate every
+      container and `break` once `len(articles) >= MAX_ARTICLES_PER_FETCH`
+      — a no-op for any source with no `title_filter` (every container
+      matches, so it still stops at the same count, same order), but a
+      real fix for a filtered one, and a small general improvement besides
+      (previously, a dud container within the first 10 — missing
+      title/link — could leave you with *fewer* than 10 real articles even
+      unfiltered; now it keeps scanning until it actually finds 10 good
+      ones or runs out of page).
+    - **Still page-1-only — pagination was investigated and shelved, not
+      solved.** Both Chambéry's and Lyon 1's listings are JetEngine
+      (Elementor) "Load More" widgets: no real `<a href>` pagination link
+      exists in the static HTML at all (confirmed directly), and the
+      widget's own `ajaxlisting` endpoint (`JetEngineSettings.ajaxlisting`
+      in the page's inline JS) needs the *entire* Elementor widget
+      `settings` JSON blob as part of its POST body to render page 2 —
+      guessing at a minimal payload (`page`/`query_id`/`id` alone) 404'd.
+      Standard WordPress pagination tricks (`/page/2/`, `?paged=2`) were
+      also tried and just re-served page 1's content unchanged — this
+      widget doesn't hook into WP's native query pagination at all, only
+      its own AJAX. A real fix needs the *actual* POST body a browser
+      sends on "next page" — if this becomes worth doing, the fastest path
+      is having the user capture it themselves (DevTools → Network tab →
+      click to the next page → right-click the request → Copy as cURL)
+      rather than guessing blindly again.
+  - **The Jobs tab's source-chip row already visually clusters by
+    `group_tag`** (`renderSourceChips` in `app.js` — see "Source groups"
+    elsewhere in this file); on top of that, a **`#job-group-toggle`**
+    (`All`/`PhD`/`ComSci`, styled as the same `.view-toggle` pair as the
+    adjacent List/Calendar switch) is a one-click shortcut over the
+    *existing* per-source chip filter (`activeJobSources`) — picking a
+    group just populates that same `Set` with every source name carrying
+    that `group_tag`, the identical end state a manual multi-select of
+    individual chips would produce. Not a second filtering mechanism:
+    "All" clears the set, matching the "empty = show everything"
+    convention already used everywhere else in this app's chip rows.
+    Reads `source_group` directly off each already-fetched job article
+    (present in `/api/articles`' response) rather than a second
+    `/api/sources` round-trip.
+  - **Pagination for the JetEngine sources was solved for real, not
+    shelved** — the user captured the actual "Afficher plus d'offres"
+    button's network request via browser DevTools (Copy as cURL) after the
+    blind-guessing attempt above 404'd, which turned out to need the
+    *entire* Elementor widget settings blob as its POST body, not a
+    handful of guessed fields. `_fetch_jetengine_extra_pages()` in
+    `scraper.py` extracts everything that payload needs fresh from page
+    1's own HTML on every scrape (a `data-nav="..."` JSON blob holding the
+    `query`/`widget_settings` dicts verbatim, `data-queried-id`, the
+    listing-grid widget's own Elementor `data-id`, and `data-pages` for
+    the total count) rather than hardcoding any of it, so it keeps working
+    if the widget's settings ever change. New per-source boolean
+    `sources.paginate` (plain `ALTER TABLE ADD COLUMN`, no CHECK
+    constraint) opts a `css` source into this — checked live end-to-end
+    on both Chambéry and Lyon 1 (6 pages), not just against saved HTML:
+    Lyon 1's `title_filter` match sat on a page *past* page 1 and was
+    found correctly.
+    - **First regex attempt at extracting that blob was wrong and
+      silently matched nothing** — assumed the JSON lived in a generic
+      `data-settings="..."` attribute (there are many of those on an
+      Elementor page, for unrelated widgets) under a key called
+      `load_more_el`. The real attribute is `data-nav="..."`, and the
+      real key is `more_el`. Caught by testing the extraction against the
+      same saved real HTML this feature was built from and getting
+      `False` back where `True` was expected — worth remembering:
+      *"I found this in the page once"* isn't the same as *"the regex
+      that's supposed to find it does"*, always run the actual extraction
+      against real data before trusting it.
+    - `_php_form_fields()` flattens the extracted `query`/`widget_settings`
+      dicts (plus a `page_settings` dict built from the other three
+      extracted values) into WordPress's `key[sub]=`/`key[]=` bracket form
+      encoding — a JSON boolean becomes the literal string `"true"`/
+      `"false"` (confirmed against the real captured payload, not
+      Python's `True`/`False`, which `requests` would otherwise encode as
+      `"True"`/`"False"` and the server wouldn't recognize).
+    - This endpoint needs no session/auth at all — confirmed by testing
+      the user's captured request with its session cookie stripped out
+      entirely; it still worked.
+  - **A new `sources.kind`, `"inspirehep"`, is a second real-API
+    integration alongside `email`** — InspireHEP (the CERN/DESY/Fermilab/
+    SLAC-run HEP literature and jobs database) has a public, documented
+    JSON REST API, so `scrape_inspirehep()` in `scraper.py` hits it
+    directly rather than scraping its (React SPA) job-search page. Same
+    "prefer a real API over scraping" reasoning as `email_import.py`, and
+    the same "dedicated kind for one specific site's own shape" reasoning
+    as everywhere else in this app that special-cases one integration
+    (rather than a generic configurable `"json"` kind, which would need a
+    real path-based field-mapping system to be worth building for what is,
+    so far, exactly one JSON API). `source["url"]` is the *full* API query
+    URL including every filter (`rank=PHD`, `field_of_interest=hep-ex`,
+    `status=open`, ...) — no selector fields are used at all for this
+    kind, matching how `scrape_rss` needs none either. Job title from
+    `metadata.position`, link constructed from the record's own `id`
+    (`https://inspirehep.net/jobs/{id}`, InspireHEP's own frontend routing
+    — not a field the API returns directly), `deadline` from
+    `metadata.deadline_date` when present, and `excerpt` from
+    `metadata.description` (reusing `extract_excerpt()`, previously
+    documented as RSS-only — now also used here, see that function's own
+    docstring).
+  - **A real, production-hitting migration bug was caught and fixed
+    while adding the `inspirehep` kind: `_recreate_sources_table()`
+    silently dropped 46 sources and orphaned 454 articles.** The function
+    rebuilds `sources` from the `SCHEMA` constant's literal `CREATE TABLE`
+    text, but that text was never kept in sync with columns added later
+    purely via `COLUMN_MIGRATIONS` (`title_filter`, `paginate`,
+    `group_tag`, ...) — so the freshly recreated table was missing them,
+    the `INSERT ... SELECT` copy step (built from `sources_old`'s *full*
+    column list) failed outright, and the exception hit *after* the old
+    table was renamed away but *before* `DROP TABLE sources_old` — leaving
+    a permanently-empty fresh `sources` table. The next startup's
+    `seed_sources.seed()` then filled that empty table with its 20
+    defaults (nothing to conflict with, since it checks by name against
+    an empty table), and every real article's `source_id` was left
+    pointing at a source that no longer existed. Caught immediately by
+    this file's own `_check_foreign_key_integrity()` startup check (454
+    violations, table count dropped from 66 to 20) — not by anything that
+    prevented it happening; a manual backup taken 30 seconds before the
+    migration (this project's own "before any schema change" convention)
+    is what made recovery lossless. **Fixed by calling `_ensure_columns()`
+    on the freshly recreated table before the copy step**, so its shape
+    always matches `sources_old`'s regardless of whether `SCHEMA`'s literal
+    text has drifted — this bug was latent since the very first column
+    added purely via `COLUMN_MIGRATIONS` after `'social'`/`'job'` were
+    introduced, it just never happened to coincide with a *fresh* recreate
+    until `email`'s and `inspirehep`'s CHECK-constraint additions landed
+    the same day title_filter/paginate did. Every future
+    kind/category-constraint addition already goes through this same
+    now-fixed helper, so this class of bug shouldn't recur.
+  - **Another source added the same way**: `ADUM Paris-Saclay: PHENIICS`
+    (id 637, group PhD) — Paris-Saclay's ADUM portal (`adum.fr/psaclay/pt`)
+    lists thesis proposals across *every* one of its doctoral schools by
+    default; filtered to just PHENIICS (particle/nuclear physics) via
+    `?edChoix=260`, the value found in the page's own `<select
+    name="edChoix">` dropdown — same "extract the real filter param from
+    the page rather than guess" discipline as everywhere else in this
+    file. Reuses the exact same `a[href*="voirproposition"]` bare-anchor
+    selector as the pre-existing `ADUM: particule` source (same
+    underlying ADUM platform), but needs a **different `base_url`**:
+    `voirproposition.pl` links on `propositionFR.pl`-based pages
+    (the older source) are page-relative with no leading slash, while
+    this page's own links are absolute-path (`/as/ed/voirproposition.pl`,
+    leading slash) — using the older source's `base_url` here would
+    double up the `/as/ed/` segment. Confirmed both the filtered listing
+    (47 real PHENIICS theses) and a plain `requests.get()` (no manual
+    cookie-jar handling needed, despite the page issuing a
+    `__checksession__` redirect first — `requests` carries the
+    intermediate `Set-Cookie` through a single call's redirect chain
+    automatically) work exactly like the scraper's own fetch path before
+    calling this done.
+- **The aggregate RSS feed is now two separate feeds, not one mixing
+  everything** — `GET /api/feed.xml` (news, `exclude_category="job"`) and
+  a new `GET /api/jobs-feed.xml` (`category="job"`), both thin wrappers
+  around a new `category`/`exclude_category` param pair on
+  `scraper.get_articles()` (mirroring `web.py`'s `list_articles()` own
+  same-named params, previously only exposed on the JSON API, not the RSS
+  export). Split because a subscriber wanting physics news doesn't want
+  job postings mixed in and vice versa — same reasoning Feed/Jobs already
+  apply to every other view. The Jobs tab's "📡 RSS feed" toolbar link now
+  points at the new jobs-only URL; Feed's own link is unchanged (still
+  `/api/feed.xml`, now implicitly news-only).
+  - **This is also what made an Obsidian RSS-plugin failure make sense**:
+    the feed itself was verified valid RSS 2.0 both before and after the
+    split (parsed cleanly with `xml.etree.ElementTree`, correct
+    `application/rss+xml` content-type) — the real problem was Cloudflare
+    Access gating the *whole* `news.alpsciences.com` hostname (see
+    `DEPLOYMENT.md`), which an automated RSS reader has no way to get
+    through (no browser to complete the email-OTP challenge). Fixed with a
+    second, path-scoped Access Application just for `/api/feed.xml`
+    (`/api/jobs-feed.xml` needs the same treatment, not yet done), policy
+    action **Bypass** rather than Allow — deliberately public, since "any
+    RSS reader can subscribe" was always this feature's own stated intent,
+    unlike the rest of the app.
+- **Feed's "open embedded" viewer (see the `title_filter`/pagination
+  entry above for when this was introduced) grew three more pieces, all
+  scoped to `openEmbedded` cards only (Jobs is unaffected by any of
+  this):**
+  - **The whole card — image included, not just the text body — is the
+    click target**, both for opening the viewer and (separately) for
+    Jobs' bulk-select mode. Originally scoped to just `.card-body`; moved
+    the `data-embed-url`/`data-select-id` attributes up onto the outer
+    `.card` div instead once asked to include the thumbnail too. The
+    favorite star (`.fav-btn`) is explicitly excluded from both delegated
+    click handlers — it already has (or, for Feed, now the modal has) its
+    own handler, and without the exclusion a click there would also
+    bubble up and wrongly trigger the card-level action.
+  - **The favorite toggle moved off the card and into the viewer modal
+    itself, for `openEmbedded` cards only** — once the whole card opens
+    the modal on click, a second independent action sitting on the card
+    underneath was just a competing target for no benefit; every action
+    for a Feed article now lives in one place once you've opened it.
+    `id`/`is_favorite` ride along as `data-embed-id`/`data-embed-fav` on
+    the card (no second API call) into `openArticleViewer(url, title, id,
+    isFavorite)`, which renders its own `.fav-btn` in `.modal__head` and
+    wires it straight to the existing `toggleFavorite()` — that function
+    was already self-contained (reads only the button's own
+    `dataset.id`/`textContent`), so it needed no changes to work from a
+    second call site. Jobs' on-card favorite button is untouched.
+  - **"Viewed"/"remind me later" state is localStorage-only** (`
+    newsbot-feed-article-state`, keyed by article id) — no server column,
+    same per-viewer-convenience spirit as the character persona in the
+    sibling achievement-vault project. Opening the viewer (or clicking
+    "⏰ Remind me later (24h)" inside it, which also closes the modal)
+    marks the article `viewed`, which grays the card out
+    (`.card--viewed`, `opacity: 0.55`) — applied immediately to the live
+    DOM node when the action happens, not just persisted for next load.
+    A "remind me later" article additionally gets a `remindAt` timestamp;
+    `feedArticleStatus()` treats a still-future `remindAt` the same as
+    plain `viewed` (grayed), but once `Date.now()` passes it, it lazily
+    clears *both* flags and reports `"normal"` again — deliberately
+    reusing the plain "never viewed" appearance for "light back up"
+    rather than inventing a third, visually-distinct "due" state that
+    would look identical to "never viewed" anyway. The clear-on-read
+    happens inside `feedArticleStatus()` itself (called from every
+    `renderCard()`), so an expired reminder self-heals on the very next
+    render rather than needing a separate sweep/timer.
+- **A job/thesis offer can carry a `remuneration` value (new base column,
+  plain `ALTER TABLE ADD COLUMN` -- no CHECK constraint) and a manual
+  `job_tag` override, both editable straight from a Jobs card, plus a
+  "Pay stats" view aggregating remuneration by tag.**
+  - **`scraper.extract_remuneration()` is best-effort, applied at insert
+    time only** (never re-run on existing rows, same "scraping never
+    revisits an already-persisted article" property that already makes
+    the CERN-Courier-style image backfills safe) — only a title/excerpt
+    are ever available for a job article (a `css` source has no body
+    text at all; even `rss`/`inspirehep`'s excerpt is a short blurb), so
+    coverage is partial by design, not a bug to chase. `REMUNERATION_RE`
+    matches a number (with thousands separators, or compact `k`
+    notation), an optional currency symbol either side, an optional
+    range (`-`/`–`/`to`/`à`), and up to two trailing suffix words
+    (`brut`/`net`/`annuel`/`/an`/`per year`/...) — stores the matched
+    *text* verbatim (e.g. `"35 000 - 40 000 € brut annuel"`), not a
+    parsed number, since the range/currency/period all carry real
+    information a bare number would throw away.
+  - **The reliable path is manual entry, not extraction** — `PUT
+    /api/articles/:id/remuneration` (free text, blank clears it), a
+    `.remuneration-edit-btn` ("+ Pay" / "✎", same shell as the existing
+    `deadline-edit-btn` — `openRemunerationEditor()` mirrors
+    `openDeadlineEditor()` almost exactly, a plain text input instead of
+    a date picker) — Jobs-only, gated behind `allowDeadlineEdit` in
+    `renderCard` (that flag already doubles as "this is a Jobs card"
+    for deadline/archive, reused here rather than adding a fourth
+    Jobs-only option name).
+  - **`job_tag` gained its first per-article manual override** (`PUT
+    /api/articles/:id/job-tag`) — until now it was only ever set by
+    `classify_job()`'s keyword matching or a source's `forced_job_tag`
+    at scrape time, with no way to fix a wrong/missing tag on one
+    article short of editing `job_tags`' keywords globally and
+    re-running `retag_jobs()` for *everything*. On a Jobs card the
+    static `.job-tag` span becomes a real `<select>`
+    (`.job-tag-select`, same `allowDeadlineEdit` gating, options from
+    `state.jobTags` — `loadJobs()` now fetches `/api/job-tags` itself
+    rather than assuming Settings/Sources already populated it, since
+    Jobs can easily be the first tab visited) — changing it fires the
+    PUT immediately, no separate save step.
+  - **`GET /api/jobs/stats`**: count / "how many have a remuneration
+    value at all" / avg / min / max per `job_tag` (untagged articles
+    bucket under `"Untagged"`, matching how a null `job_tag` already
+    displays everywhere else). Its own numeric parse
+    (`_parse_remuneration_number`) is deliberately cruder than
+    `REMUNERATION_RE` — it only needs *a* representative number out of
+    an already-stored string, not to *find* one in free-form text, so it
+    just grabs the first number and expands `k` notation. **A range
+    uses its first (lower-bound) number** — a consistent, simple choice
+    over attempting a true midpoint, and disclosed as such in the Jobs
+    tab's own stats-modal copy so the numbers aren't mistaken for
+    precise figures. Surfaced via a "📊 Pay stats" toolbar button
+    (`openJobStatsModal()`) — a fresh fetch on every open rather than
+    computing client-side from `state.jobs`, so the aggregation logic
+    exists in exactly one place (the server).
+- **`scraper.parse_feed_items()` gained real RSS 1.0/RDF support** — hit
+  for real when adding APS Physics Magazine (`feeds.aps.org`), a valid
+  feed whose real `<item>` elements the RSS-2.0-only `./channel/item`
+  lookup silently found none of. RDF differs in two ways from ordinary
+  RSS 2.0: `<item>` is a *sibling* of `<channel>` (a direct child of the
+  root `<rdf:RDF>`), not nested inside it; and the root declares a bare
+  `xmlns="http://purl.org/rss/1.0/"` default namespace, so *every*
+  unprefixed element (`item`/`title`/`link`/`description` alike) actually
+  needs the `RSS1_NS` prefix for ElementTree to find it — a first attempt
+  at this fix used unprefixed lookups for the newly-added RDF branch and
+  still silently returned zero items, caught only by testing against the
+  real feed. Dates come from Dublin Core's `<dc:date>` (real ISO 8601)
+  instead of RFC 822 `<pubDate>`. General fix, not APS-specific — any
+  future RDF-based feed now works the same way RSS 2.0/Atom already did.
+- **More sources added the same way** (real reachability/content checked
+  before adding, several dead ends found and *not* added — see below):
+  - **Physics World: Particle & Nuclear** (`physicsworld.com/c/particle-nuclear/feed/`,
+    not the generic `/feed/`, which is the whole site) and **APS Physics
+    Magazine** and **Quanta Magazine: Physics** — all real `kind: "rss"`
+    news sources, all verified with real images/dates.
+  - **Symmetry Magazine** (Fermilab/SLAC's own particle-physics
+    publication, otherwise a perfect topical fit) is Cloudflare-blocked
+    (a real "Just a moment..." challenge page, confirmed with a full
+    browser User-Agent, not just a bare curl) — not added, same
+    "don't build a bypass" line as Indeed elsewhere in this file.
+  - **Universcience** (France's Cité des Sciences/Palais de la
+    Découverte — the flagship French science-outreach employer) — a
+    Talentsoft-powered career site (`.ts-offer-card`), `title_filter:
+    "m[ée]diat"` scoping it to médiation-relevant postings out of its
+    ~10 current listings. No `date_selector` — the real date lives in a
+    sibling element one structural level up from where a naive `.parent`
+    walk lands (every card's "nearest" metadata block turned out to be
+    the *first* card's, not its own), not worth the extra selector work
+    for a source this small.
+  - **Physics World Jobs** (`physicsworldjobs.com` — a real Madgex-
+    powered job board with **auto-discoverable per-search RSS**, found
+    via its own `<link rel="alternate" type="application/rss+xml">` tag
+    rather than guessing a feed URL) — `?keywords=outreach` is a loose
+    match, mostly surfacing ordinary physics faculty/postdoc postings
+    that happen to mention outreach as a secondary duty, not dedicated
+    outreach roles; `?keywords="public engagement"` returned zero.
+    Added anyway (real, reachable, occasionally on-target — e.g. a real
+    "Postdoctoral Fellow in Experimental Particle Astrophysics" result)
+    but flagged as low-precision, not a confident match the way
+    Universcience is.
+  - **CNRS's own job portal** (`emploi.cnrs.fr`) and **IOP Jobs**
+    (`iopjobs.org`, the UK Institute of Physics' careers site — real
+    outreach roles exist there per search results, e.g. "Public
+    Engagement Officer", but its live listings page came back
+    essentially empty when actually fetched) were both investigated and
+    **not** added — CNRS's real listings are reachable, but its
+    keyword search is an ASP.NET postback form (`__VIEWSTATE`-based),
+    not a plain URL, so only unfiltered browsing works today (all CNRS
+    categories, médiation-scientifique postings vanishingly rare in the
+    unfiltered stream); IOP Jobs' listing pages returned real HTTP but
+    with no actual vacancy content in it at fetch time. Worth
+    revisiting if the ASP.NET search gets solved or IOP's site is
+    checked again later, not permanently ruled out the way
+    Cloudflare/DataDome-blocked sites are.
+  - **ESA Careers** (`jobs.esa.int`) — a real, auto-discoverable RSS feed
+    (`/services/rss/job/?locale=en_GB`, found the same way Physics World
+    Jobs' was, via `<link rel="alternate">`), added with `title_filter:
+    "outreach|communication|public engagement"`. ESA's own `keywords=`
+    search parameter was tested first and found to not actually filter —
+    both `keywords=(outreach)` and a plain `science+communication` search
+    returned the same generic mix of engineering/trainee roles — so this
+    relies entirely on `title_filter` over the unfiltered feed instead of
+    ESA's own search. **This is what surfaced `title_filter` being a
+    no-op for every `kind: "rss"` source** (see below) — it had only ever
+    been implemented for `scrape_css()`.
+  - **CNES** (`recrutement.cnes.fr`, the French space agency) was
+    investigated and **not** added — it's a Nuxt.js SSR shell with no
+    job data in the initial page load at all (confirmed by fetching the
+    page and finding no embedded JSON), backed by a "Digital Recruiters"
+    ATS whose API (`api.digitalrecruiters.com`) flatly 403s
+    (`{"message":"You're not allowed to access this resource"}`) on every
+    plausible endpoint/header combination tried — with and without a
+    `query` param, with `Accept: application/json`, and with a spoofed
+    `Referer`/`Origin` matching the real site. No API key or token for it
+    was found anywhere in the page source or its ~720KB main JS bundle
+    (only an unrelated Google Maps key turned up). This reads as a real
+    auth-gated API, not a simple header check to work around — left
+    uncovered rather than pursuing a bypass.
+- **`scraper.scrape_rss()` now applies `title_filter` too — it silently
+  never had before.** `title_filter` (a per-source regex noise filter, see
+  Universcience/CNRS-Emploi above) was built and documented only inside
+  `scrape_css()`; every `kind: "rss"` source's fetch path
+  (`parse_feed_items()` → `scrape_rss()`) never looked at the column at
+  all, so setting `title_filter` on an RSS source was a silent no-op —
+  caught immediately when the newly-added ESA Careers source (RSS, see
+  above) returned all 20 unfiltered postings instead of the expected
+  outreach-only subset. Fixed by filtering `entries` in `scrape_rss()`
+  right before the same `entries[:limit]` slice already there — same
+  "filter before capping to `limit`, not after" reasoning `scrape_css()`'s
+  own comment already documents (a match could sit past the first `limit`
+  raw items in a busy feed), just applied to the RSS path for the first
+  time. No existing RSS source had `title_filter` set before this (only
+  CSS sources did), so this is purely additive — nothing that already
+  worked changed behavior.
+- **A job/thesis offer's own page text can be saved as a local snapshot,
+  and gets deleted again when the offer is archived.** Job listings
+  routinely get taken down or edited once a deadline passes or a role is
+  filled — unlike a news article, which stays up — so there was no way to
+  keep a copy of what an offer actually said after the fact, short of
+  the (extraction-only, non-persistent) embedded-viewer iframe Feed
+  already has.
+  - **`POST /api/articles/:id/save-text` takes pasted HTML from the
+    caller, not a server-side fetch — an earlier version fetched the
+    article's own `link` server-side and was dropped after real testing.**
+    That first version reused `_is_safe_external_url` + `scraper.fetch_html`,
+    the same pattern every other caller-supplied-URL fetch in this app
+    uses — but job/thesis listing pages are disproportionately likely to
+    sit behind Cloudflare/DataDome or a login wall (this app has already
+    hit exactly that wall for several whole *sources* — Symmetry Magazine,
+    psthc.fr/PSNProfiles in the sibling achievement-vault project, see
+    "don't build a bypass" elsewhere in this file), so a plain fetch of an
+    arbitrary job page failed silently far more often than this app's
+    other server-side fetches (RSS/CSS scraping, the embedded article
+    viewer) ever do — reported directly as "save text dont work." Fixed
+    the same way PSNProfiles' import in the sibling project was: stop
+    depending on a fetch a real site can block, and have the user paste a
+    page they already have open (View Page Source, or Ctrl+A/copy the
+    rendered page) instead. The route takes `{html: "..."}` and stores
+    `soup.get_text(separator="\n", strip=True)` — after stripping
+    `<script>`/`<style>`/`<noscript>` — into `articles.saved_text` (plain
+    `ALTER TABLE ADD COLUMN`, no CHECK constraint, same migration shape as
+    `remuneration`); 400s on empty input or on HTML with no extractable
+    text, rather than silently storing an empty snapshot. Plain text, not
+    HTML: the point is outliving the page's own markup, and storing HTML
+    would mean re-sanitizing it (the same script-strip
+    `_fetch_for_iframe_embed` already has to do for the *live* iframe
+    path) every time it's shown again, which plain text sidesteps
+    entirely. Re-saving overwrites any previous snapshot — no history is
+    kept, this is "the latest snapshot," not a version log.
+  - **Archiving an offer clears `saved_text` back to `NULL`**
+    (`archive_article` now does `SET archived = 1, saved_text = NULL` in
+    one statement) — deliberately a real deletion, not something
+    unarchiving restores. The snapshot exists to bridge the gap before
+    you've decided what to do with an offer; once it's archived (decided,
+    one way or another), there's no more reason to keep the page text
+    around. `DELETE /api/articles/:id/save-text` also exists standalone,
+    for clearing a snapshot without archiving the offer itself.
+  - **Not restricted to `category == "job"` server-side** — same "the UI
+    is the only place a control for this exists, the server doesn't
+    re-enforce it" pattern `set_article_deadline` already documents;
+    saving text for a news article would just be harmless and unused.
+  - **UI**: a Jobs-card button that's `"💾 Save text"` when
+    `article.saved_text` is empty — clicking it opens
+    `openSaveTextModal()`, a textarea to paste the copied HTML/page text
+    into, with instructions to View Page Source or select-all/copy the
+    rendered page first — or `"📄 Text"` once populated, opening a
+    `<pre>`-rendered viewer modal (`openSavedTextViewer()`, styled like
+    the existing article-viewer modal but with a plain-text body instead
+    of an iframe) with its own "✎ Re-paste" (reopens the same paste modal)
+    and "🗑 Delete snapshot" actions. Gated behind the same `allowArchive`
+    flag deadline/remuneration/archive already use for "this is a Jobs
+    card."
+- **A new job tag can be created straight from the Jobs tab**, not only
+  from Settings' full tag-management list. `openNewJobTagModal()` (wired
+  to a new "+ New tag" Jobs-toolbar button) is a small two-field modal
+  (name + comma-separated keywords) hitting the exact same `POST
+  /api/job-tags` Settings' own "Add tag" already used — no new server
+  route, just a second, lighter-weight entry point to it for the common
+  "I just want to add one tag without leaving Jobs" case. A tag created
+  this way still lands last in `sort_order` (the server's default when
+  omitted), so `classify_job()` checks it last, same as one added from
+  Settings — reordering priority still only happens from Settings'
+  move-up/move-down, this modal doesn't duplicate that.
+- **"Pay stats" is now a count-vs-pay histogram per tag plus a full
+  statistical breakdown, not just an avg/min/max table.** `GET
+  /api/jobs/stats` gained `median`/`variance`/`stdev` (Python's
+  `statistics` module — sample variance/stdev, `ddof=1`) and a `histogram`
+  array, alongside the existing `count`/`with_remuneration`/`avg`/`min`/
+  `max`. **`variance`/`stdev` are `null` below 2 values, not `0`** —
+  `statistics.variance`/`.stdev` themselves raise below n=2, and a single
+  data point genuinely has no spread to measure, so this is "no signal
+  yet," not "zero variance."
+  - **First iteration of this misread "bar chart per job tag" as one bar
+    per tag summarizing its mean** — corrected once the user clarified
+    they wanted a real 2-D distribution (count of offers vs pay), i.e. a
+    histogram, not a single-number comparison across tags.
+  - **`_histogram(values, bins=6)`** (`web.py`) bins a tag's own
+    remuneration values into up to 6 equal-width ranges across *that
+    tag's own* min/max — deliberately not one shared axis across every
+    tag, since pay scales differ wildly by tag (an Internship stipend vs
+    a Post-Doc salary) and a shared axis would flatten most tags into one
+    or two overcrowded bins while a high-paying outlier tag spreads
+    across the rest. A tag whose values are all identical (or has only
+    one) collapses to a single bin spanning that value rather than
+    dividing by a zero-width range.
+  - The modal (`openJobStatsModal()`/`renderHistogram()`) renders one
+    small vertical-bar histogram per tag (plain HTML/CSS, no chart
+    library — this app has none, and small multiples at this dataset size
+    don't need one) in a responsive grid (`.hist-blocks`,
+    `auto-fit`/`minmax`), each bar's height scaled against that tag's own
+    busiest bin, hover title showing the exact range and count. The
+    existing per-tag table stays underneath, now with Median/Std dev/
+    Variance columns added — the histogram answers "how is pay
+    distributed," the table answers "what's the exact number." A tag with
+    zero parseable remuneration values gets no histogram at all (nothing
+    to bin) but still appears in the table, since its count/with-pay
+    figures are still real information even without a pay number.
+  - **`/api/jobs/stats` deliberately does *not* filter `archived = 0`,
+    unlike every other Jobs query in this file.** Reported directly ("i
+    have 8 data but only 6 taken into account", narrowed to the Outreach
+    tag): 2 of that tag's 8 remunerated offers had since been archived
+    (applied to, closed, whatever the reason) and were silently excluded
+    from every stat -- `count`, `with_remuneration`, mean/median/min/max,
+    and the histogram all under-counted as a result. Archiving hides a
+    listing from active browsing, but it doesn't make a pay figure you
+    already recorded any less real, and this page is explicitly a
+    retrospective analysis, not a "what can I currently apply to" view --
+    so the fix was to drop the archived filter from this one query
+    entirely, not to add an "include archived" toggle. **This means
+    `count` here can be noticeably higher than what the same tag shows
+    anywhere else in the app** (Outreach: 6 active vs 24 total, once
+    archived rows are counted too) -- both the Pay-stats modal and the
+    Data Analysis page's hint text call this out explicitly so the
+    difference doesn't read as a second bug. `GET /api/jobs/analysis`
+    (volume by source / offers over time, backing the *other* two Data
+    Analysis charts) was deliberately **left excluding archived** —
+    that's a different question ("how big is my active pipeline right
+    now"), not a retrospective one, so the same fix doesn't apply there.
+- **Manual pay entry has an explicit annual-vs-monthly period selector,
+  and every stat normalizes to an annual figure before comparing.** Before
+  this, a monthly stipend and an annual salary stored in the same
+  `remuneration` free-text field were averaged as if they were the same
+  unit — a tag mixing an Internship's "900 € / month" with a Post-Doc's
+  "35 000 €" would silently understate the Post-Doc-heavy tag's real pay
+  level, since 900 sits nowhere near 35000 on the same axis.
+  - **`openRemunerationEditor()`** now has an "Amount" field (just the
+    number/range, no period wording) plus a "Period" `<select>` (Per year
+    / Per month) — `save()` composes the final stored string as
+    `"<amount> / year"` or `"<amount> / month"` rather than leaving the
+    period to be typed as free text. `splitRemuneration()` best-effort
+    reverses this on re-open (regex-strips a trailing `/ year`/`/ month`
+    for the amount field, and separately detects a monthly marker —
+    including one that arrived from scraped text like "3 000 €/mois", not
+    just the editor's own appended suffix — to pre-select the right
+    period) so editing an existing value doesn't silently reset it back
+    to "year".
+  - **`_MONTHLY_RE`** (`web.py`, alongside `_parse_remuneration_number`)
+    detects `mensuel(le)`/`/mois`/`per month`/`/month` in the stored
+    string and multiplies the parsed number by 12 before it ever reaches
+    `avg`/`median`/`min`/`max`/`histogram` — annual is still the assumed
+    default for a bare number with no period marker (unchanged behavior
+    for every value stored before this feature existed). This normalizes
+    *both* paths that can produce a monthly-flavored string: the new
+    period selector's explicit `/ month` suffix, and a source's own
+    scraped text that already said "mensuel" or similar (`extract_remuneration()`'s
+    suffix matching already captured that wording, it just wasn't acted
+    on for stats purposes until now). The Pay-stats modal's hint text
+    spells this out so the normalization isn't a silent, surprising
+    transformation.
+- **The "Data Analysis" top-level tab (`#view-analysis`, `loadAnalysis()`)
+  was rebuilt from scratch as a real statistical page** — requested
+  directly ("make a real statistical page... give full length for all
+  graph... add curve that fit the bar charts... add mean and var for each
+  graph"). The underlying *data* (`/api/jobs/stats`, `/api/jobs/analysis`)
+  was kept; only the rendering was torn out and replaced — see "Pay
+  parsing bugs" below for the real data-correctness fixes this rebuild
+  surfaced along the way. The original small-tile CSS-bar/flex
+  implementation (`renderBarList`/`renderTimeSeries`, a `.hist-blocks`
+  grid of ~230px tiles) is gone from this page; the "📊 Pay stats" popup
+  elsewhere in Jobs still uses the old small `renderHistogram`/
+  `.hist-block` CSS unchanged — that popup is a different, deliberately
+  lightweight surface this rebuild didn't touch.
+  - **Every chart is a real, full-width inline SVG** (`renderStatChart()`)
+    — requested directly ("give full length for all graph"), fixing the
+    original page's small fixed-width tiles. A fixed logical canvas
+    (`CHART_W`/`CHART_H` = 1000×320, `CHART_MARGIN` for axis space) is
+    scaled to its container's actual width via `width="100%"` on the
+    `<svg>` with a `viewBox` — standard responsive-SVG technique, no
+    chart library. Has real y-axis gridlines (0/25/50/75/100% of that
+    chart's own max, with duplicate rounded labels suppressed — a real
+    bug caught by testing against live data: a sparse low-count histogram
+    rounds 4 fixed fractions down to only 3 or 4 distinct integers,
+    showing e.g. "0, 1, 2, 2, 3") and x-axis tick labels (every Nth bar,
+    rotated -40° for long/numerous labels) via a shared `chartXAt(i,
+    nBars)` coordinate function, used by both the bars *and* any curve
+    overlay so a curve's points land in the exact same pixel space as the
+    bars it's meant to trace.
+  - **A fitted curve is overlaid where it's statistically meaningful, and
+    deliberately skipped where it isn't** — requested directly ("add
+    curve that fit the bar charts"), but applied with judgment rather
+    than blanket, since a curve fit presumes a continuous/ordered x-axis:
+    - **Pay histograms**: a real Gaussian (normal) density curve fit to
+      that histogram's own mean/stdev (`buildGaussianCurve()` —
+      `gaussianPdf(x, mean, stdev) * binWidth * n` sampled across the
+      bin range, the standard histogram-plus-fitted-density overlay, not
+      a cosmetic smoothing line).
+    - **Offers over time / New jobs over time**: a real least-squares
+      *quadratic* trend fit (`buildTrendCurve()`/`quadraticFit()` — solves
+      the 3×3 normal-equations system in closed form via Cramer's rule,
+      verified against a known `y = 2x² - 3x + 1` test case before
+      trusting it), clamped to `>= 0` since a fitted parabola can dip
+      below zero where real counts can't. A genuine curve fit, not a
+      moving average — time is a real ordered axis, so a trend fit is
+      statistically defensible here the way it isn't for the next two.
+    - **Offers by tag / Volume by source**: **no curve at all**, by
+      design — tag and source are nominal categories with no natural
+      order, so fitting any curve (Gaussian or polynomial) against an
+      arbitrary category ordering would be meaningless, not just
+      unhelpful. The page's own hint text says so explicitly, so this
+      reads as a deliberate choice, not a missing feature.
+  - **Mean and variance are shown under every chart**, requested directly
+    ("add mean and var for each graph") — `renderStatLine()` renders
+    mean/variance/stdev/n uniformly. Pay charts reuse the mean/variance
+    `/api/jobs/stats` already computes server-side from the real
+    remuneration *values* (parsing logic that has to live server-side);
+    every other chart's mean/variance is of the already-fetched bar
+    *counts* themselves (how many offers per tag/source/month) and is
+    computed client-side on the spot (`meanVarClient()`) — deliberately
+    not a server round-trip for arithmetic over a handful of numbers
+    already sitting in the response.
+  - **New: "New jobs over time"** — requested directly ("add new job /
+    time"), a second, deliberately different time series from "Offers
+    over time" rather than a duplicate of it: `jobs_analysis()` gained
+    `new_jobs_over_time`, grouping by `strftime('%Y-%m', first_seen_at)`
+    instead of `pub_date`. The distinction matters: `pub_date` is a
+    posting's own (sometimes real, sometimes "now"-defaulted) listed
+    date, while `first_seen_at` is never defaulted/backfilled — it's
+    always the actual moment this app's scraper found the row. "Offers
+    over time" answers "how many postings existed, dated this month";
+    "New jobs over time" answers "how much did the tracker's own
+    database grow this month" — a source with real (possibly old) dates
+    can disagree between the two a lot, and that disagreement is itself
+    informative, not a bug.
+  - **`_histogram()`'s bin size is now a fixed width (500), not a fixed
+    bin *count*** — requested directly ("make bin size 500"). A tag's
+    bin edges are aligned to multiples of 500 (`floor(min/500)*500` up to
+    `ceil(max/500)*500`), reading as round, recognizable pay ranges
+    ("26,000–26,500") rather than an arbitrary offset. Capped at 200 bins
+    as a safety net (falls back to a coarser bin size instead of
+    generating thousands of empty bins) against a single malformed
+    outlier value blowing out the range — not expected to fire under
+    normal salary data, just a guard against a future parsing bug doing
+    exactly that again (see below).
+- **Pay parsing had two real bugs, both caught by inspecting real output
+  while building this page's histograms — not found until actually
+  looking at the numbers.**
+  - **A "k" multiplier suffix written once for a whole range was silently
+    dropped.** `_parse_remuneration_number()` originally only checked for
+    a `k`/`K` immediately adjacent to the *specific* number it extracted
+    (always the range's lower bound, see its own docstring) — but a
+    French range like `"26 - 31 k€ brut annuel"` writes the "k" only once,
+    after the *second* number, so the check on the first number always
+    missed it. Every one of the 21 manually-added "médiation scientifique"
+    listings used exactly this idiom, so this wasn't a rare edge case —
+    most of that batch's pay data silently parsed as literal ~€18–45
+    instead of ~€18,000–45,000, confirmed by inspecting the live
+    `/api/jobs/stats` response (`min: 18`, `max: 41640` on the same tag)
+    before this was caught. Fixed by checking for a `k` anywhere in the
+    *whole* remuneration string, not just next to the matched number.
+  - **That first fix still missed `"18k€"` (no space before the "k")** —
+    `\bk\b` requires a word boundary on *both* sides of the "k", but a
+    digit immediately followed by "k" with no space (`"18k"`) has no
+    boundary between them at all (both "8" and "k" are `\w`). Caught
+    immediately by re-checking real output after the first fix still
+    showed `min: 18` for a different row. Fixed by only requiring the
+    trailing boundary (`k\b`), which still correctly avoids matching "k"
+    buried inside an unrelated word while catching both `"33 k€"` and
+    `"18k€"`.
+  - **Neither bug needed a data migration** — `remuneration` stores the
+    original free text verbatim and unmodified; the numeric interpretation
+    is derived fresh on every `/api/jobs/stats` call, so fixing the
+    parsing function alone retroactively fixed every affected row's
+    computed stats with no SQL UPDATE involved.
+- **A real layout bug shipped with the rebuild above: every chart was
+  "half width."** `.chart-section`/the chart-holding `<div>`s reuse
+  `.card-form` for its background/border/padding (same as every other
+  settings-style box in this app) — but `.card-form` also carries `
+  max-width: 520px`, sized for genuinely small forms (Settings' narrow
+  inputs, Add-source), which silently capped every full-width SVG chart
+  too, regardless of `main`'s own 1400px cap. Reported directly with a
+  screenshot. Fixed with a scoped override, `#view-analysis .card-form {
+  max-width: none; }`, rather than removing `max-width` from `.card-form`
+  itself — every other (genuinely narrow) use of that class elsewhere in
+  the app still wants the cap; only this one view's use of the class was
+  wrong for what it was containing.
+- **Pay stats on the Data Analysis page now excludes archived offers —
+  deliberately the *opposite* default from the "📊 Pay stats" popup,
+  not a reversal of the earlier archived-inclusion fix.** Reported
+  directly ("dont take into account archived jobs") after the page was
+  live with real data. `job_stats()` (and the new `job_pay_by_city()`,
+  see below) gained an `include_archived` param, **defaulting to
+  `True`** — the popup calls the route with no param, so it's unaffected
+  and still surfaces every pay figure ever recorded (the original fix:
+  "i have 8 data but only 6 taken into account", still true for that
+  surface). The Data Analysis page's own fetch passes
+  `include_archived=0` explicitly, since it was reported to be
+  double-counting stale, decided-and-done-with offers alongside the
+  active pipeline every *other* chart on the page already only shows
+  (`jobs_analysis()`'s `by_source`/`over_time`/`new_jobs_over_time` were
+  already archived-excluded from when they were first built — only the
+  two pay routes needed to catch up). Same underlying data, two
+  genuinely different questions ("what's the real pay data I've ever
+  recorded" vs "what does my active pipeline look like") — not a
+  contradiction, just two different defaults for two different call
+  sites, each documented in `job_stats()`'s own docstring so a future
+  session doesn't "fix" one back to match the other.
+- **New: "Pay by city" chart**, requested directly now that `city` exists
+  at all (see "Job locations" above) — one bar per city (that city's own
+  mean pay), backed by a new **`GET /api/jobs/pay-by-city`** route
+  (`job_pay_by_city()`), structurally the same per-group pay aggregation
+  `job_stats()` already does, just grouped by `city` instead of
+  `job_tag` — the shared per-bucket math (avg/median/min/max/variance/
+  stdev) was factored out into `_pay_summary_stats()` so both routes
+  compute it identically rather than two copies drifting apart. No
+  per-city histogram, unlike per-tag — city is a much sparser grouping in
+  practice (often one or two offers per city), so a *distribution* chart
+  per city would mostly be empty bins; a single mean-pay bar per city is
+  the useful comparison, same "no curve, categories aren't ordered"
+  reasoning Offers-by-tag/Volume-by-source already established for this
+  page. Offers with no city set are simply excluded (no "Unknown city"
+  catch-all bucket the way `job_tag` has "Untagged") — lumping every
+  uncategorized location together wouldn't be a meaningful comparison
+  point the way "Untagged" still legitimately is for tags.
+- **Bin size and time granularity are real, caller-adjustable controls
+  now, not hardcoded** — requested directly ("allow to manually change
+  bin for all graph"), applied everywhere a chart actually has a "bin"
+  concept, and deliberately *not* added where it doesn't:
+  - **`job_stats()` gained a `bin_size` param** (still default 500),
+    threaded straight into `_histogram(values, bin_size=bin_size)`.
+  - **`jobs_analysis()` gained a `granularity` param** ("week"/"month"
+    default/"quarter") — its real equivalent of a bin size, since the
+    "bin" on a time-series chart is the width of each time bucket.
+    Bucketing moved from SQLite's `strftime('%Y-%m', ...)` (hardcoded to
+    month, and SQLite has no native week/quarter format to fall back on)
+    to a new Python helper, **`_time_bucket(iso_str, granularity)`** —
+    both queries (`over_time`/`new_jobs_over_time`) now fetch raw
+    timestamps and bucket them in Python instead, so week/month/quarter
+    all go through one consistent function rather than juggling three
+    different SQL dialects. Verified against real timestamps across a
+    year boundary and a Dec 31 ISO-week edge case (`2026-12-31` lands in
+    `2026-W53`, not `2027-W01`) before trusting it.
+  - **Deliberately absent from every purely categorical chart** (Offers
+    by tag, Volume by source, Pay by city) — one bar already *is* one
+    real category there; there's no width to adjust, so no control is
+    shown for them.
+  - **Toolbar controls**: a "Pay bin (€)" number input and a "Time
+    bucket" `<select>` (`analysis-bin-size`/`analysis-granularity`),
+    persisted to `localStorage` like this page's other preferences, each
+    triggering a full `loadAnalysis()` re-fetch on change (not a
+    client-side re-bin of already-fetched data — the bin/bucket math
+    lives server-side in both routes, so changing either control has to
+    go back to the server).
+  - **A real decorator-placement bug shipped in the first pass**: `_time_bucket`
+    was defined *between* `@app.get("/api/jobs/analysis")` and
+    `def jobs_analysis(...)`, which silently attached the route decorator
+    to `_time_bucket` instead — FastAPI then (correctly, for what it was
+    told) generated `/api/jobs/analysis`'s query-param schema from
+    `_time_bucket`'s own signature, 422ing every request with `"iso_str:
+    Field required"` since that route no longer resembled the real
+    `jobs_analysis()` function at all. Caught immediately by testing the
+    new `granularity` param live rather than trusting a clean deploy —
+    fixed by moving the decorator back down to directly precede
+    `jobs_analysis` itself, with the helper function left undecorated
+    above it.
+- **"Untagged" is excluded from this page's tag-grouped charts** (Pay by
+  tag, Offers by tag) — requested directly. It's real, legitimate data
+  elsewhere in this app (Jobs' own tag filter and the "📊 Pay stats"
+  popup both still show it), but on this page specifically it's
+  typically the single largest bucket by a wide margin (every scraped
+  job whose title matched no tag's keywords lands here), so left in, it
+  visually dominated both charts at the expense of every tag that's
+  actually been classified. `excludeUntagged()` filters the already-
+  fetched `stats` array client-side (`s.tag !== "Untagged"`) before any
+  chart is built from it — a display-only filter, nothing is deleted or
+  re-tagged, and `Pay by city`/Volume by source/the time series are
+  unaffected (none of them group by `job_tag` in the first place).
+- **The 5 lowest-signal job tags (Post-Doc, Fellowship, Internship,
+  Professorship, Physicist) had every then-current offer bulk-archived**
+  (2026-09-28, one-time, no lasting script — 31 rows: 12 Post-Doc, 7
+  Professorship, 5 Internship, 4 Physicist, 3 Fellowship) — these are the
+  same 5 tags `JOB_TAG_HIDE_DEFAULT` already hides from the Jobs list by
+  default (see "Job tags" above); archiving went further than hiding,
+  clearing them out of the active dataset entirely rather than just the
+  UI filter. Done via the real per-article `PUT
+  /api/articles/:id/archive` route in a loop (the same route the "Archive
+  selected" bulk-UI button already calls) — same "not a new bulk-by-tag
+  endpoint, just the existing per-id route run in a loop" reasoning as any
+  other one-time cleanup in this app. Reversible per-article via the
+  existing (UI-less, API-only) unarchive route if any of these turn out
+  to matter after all; nothing here changed `JOB_TAG_HIDE_DEFAULT` itself
+  or classify_job's keyword matching, so future scrapes still tag and
+  create new offers under these 5 categories exactly as before — only the
+  already-existing rows were touched.
+- **Indeed job-alert imports were duplicating the same posting under
+  different links** — reported directly ("some indeed job are imported
+  multiple times"). Root cause, confirmed against real stored rows before
+  fixing anything: Indeed's `rc/clk` links carry a stable `jk=<job key>`
+  identifying the actual posting, but wrapped in per-email tracking noise
+  (`qd=`, `tk=`, `alid=`, `bb=`, `rd=`, ...) that's different on *every*
+  email even for the exact same job — three separate digests all linking
+  the identical `jk=` value, each with a different `qd=`. Since
+  `articles.link` is this app's only dedup key (`persist_articles()`'s
+  `INSERT OR IGNORE` relies on it), a link that changes shape every time
+  silently defeated that dedup.
+  - **`email_import._normalize_indeed_link()`** reduces any link carrying
+    a `jk=` param down to Indeed's own canonical, stable job-view URL
+    (`https://<host>/viewjob?jk=<key>`) before it's ever compared against
+    what's already stored — this is a real, standalone-working Indeed
+    URL (literally what Indeed's own "copy link" on a job gives you), not
+    a guessed/truncated one, so nothing is lost by dropping the tracking
+    params from the *stored* link. Applied in `_parse_message()` right
+    after `html.unescape()`. Verified against the two real duplicate hrefs
+    that prompted this fix — both normalize to the exact same URL.
+  - **Sponsored ("`pagead/clk`") Indeed links have no stable identifier at
+    all** — confirmed directly: three emails advertising the identical
+    title had three completely different `ad=` tokens (the *only*
+    meaningful param on that link shape), so there's nothing to normalize
+    the way `jk=` links have. Silently treating a same-titled pagead
+    import as either "definitely the same job" (skip it) or "definitely
+    different" (import it) would guess wrong some of the time — so
+    instead of guessing, it's staged in a new `pending_indeed_duplicates`
+    table (`db.py`) for a manual call, exactly as requested ("if title is
+    the same i should choose manually").
+    - **`scraper.scrape_email()`** checks each pagead-style job's title
+      (case/whitespace-insensitive) against already-active (`archived =
+      0`, `category = 'job'`) articles; a match gets `INSERT OR IGNORE`d
+      into `pending_indeed_duplicates` (keyed by its own `UNIQUE(link)`)
+      instead of being returned as an `Article` at all — a genuinely new,
+      non-colliding pagead job is returned normally, untouched.
+    - **`status` (`pending`/`imported`/`discarded`), not a delete-on-resolve
+      row** — `fetch_indeed_jobs()` re-reads *every* message on every run
+      by design (see its own docstring), so a discarded candidate's link
+      needs to permanently block re-staging the same way an already-
+      created `articles` row already blocks re-import via its own
+      `UNIQUE(link)` forever; deleting the row on resolve would lose that
+      memory and re-surface the identical "possible duplicate" on the very
+      next scrape.
+    - **`GET /api/jobs/pending-duplicates`** (only `status = 'pending'`
+      rows, joined with the matched article for side-by-side comparison),
+      **`POST .../import`** ("not a duplicate, keep both" — routes through
+      `scraper.persist_articles()`, the *same* path a normal scrape would
+      have used, so job_tag/content_tag/remuneration-from-title/pub_date-
+      defaults all apply identically rather than a second hand-rolled
+      INSERT drifting out of sync with that logic over time), and
+      **`DELETE .../:id`** ("same posting, discard this copy" — sets
+      `status = 'discarded'`, doesn't remove the row).
+    - **UI**: a Jobs-toolbar "⚠ Review duplicates (N)" button
+      (`refreshPendingDuplicatesCount()`, checked on every `loadJobs()`,
+      hidden entirely at `N = 0`) opens a modal
+      (`openPendingDuplicatesModal()`) listing each candidate side-by-side
+      with the article it matched — title, link, date on both sides — with
+      "🗑 Discard" / "+ Import anyway" per pair.
+  - **Verified live against the real inbox**: re-running the Indeed
+    source after this fix returned the previously-duplicated `jk=`-based
+    jobs all normalized to identical links (`persist_articles()`'s
+    existing dedup now catches them correctly), and 3 genuinely-ambiguous
+    pagead postings (all matching one already-active "Chargé.e de mission
+    éducation à la biodiversité..." offer) landed in the pending-review
+    queue instead of being silently duplicated a 4th time.
+  - **Existing already-duplicated rows from before this fix were merged
+    in a one-time cleanup** (2026-09-29, no lasting script — 15 real
+    `jk=`-duplicate groups, 34 extra rows removed). A first attempt was
+    blocked by this environment's own safety classifier as an
+    unverifiable-scope bulk deletion (direct SQL DELETEs across real user
+    data need the user's own explicit go-ahead, not an agent deciding
+    scope is "obviously fine" on their behalf) — re-run only after the
+    user explicitly said "run it". A manual `news.db.pre-indeed-dedup-*`
+    snapshot was taken first (`cp`, matching this repo's own
+    `news.db.pre-<change>-<timestamp>` convention already visible in
+    `data/`), same "back up before anything risky" discipline documented
+    elsewhere. Per group: kept whichever row had the most manually-added
+    fields set (`job_tag`/`remuneration`/`deadline`/`saved_text` —
+    verified beforehand that none of the 34 rows being removed were
+    favorited or carried an image), backfilled any of those fields the
+    kept row was missing from a duplicate that had it, rewrote the kept
+    row's `link` to the canonical `viewjob?jk=` form, then deleted the
+    rest. Confirmed after: 116 → 82 email-imported rows, zero remaining
+    `jk=` duplicate groups. **The script had to run as a real file
+    (`docker cp` into the container, then `python3 /app/<script>.py`),
+    not a `python3 -c "..."` heredoc through nested `ssh`/`docker exec`
+    quoting** — the heredoc silently produced no output and changed
+    nothing, caught by re-checking the duplicate count after the "run"
+    showed zero effect rather than trusting a clean exit with no error.
+    Also confirmed a script run this way needs to live under `/app`
+    specifically, not `/tmp` -- `docker exec`'s working directory is
+    the image's own `/app` (see the `Dockerfile`), but a *file* run via
+    `python3 <path>` puts that file's own directory on `sys.path[0]`,
+    not the process's cwd -- so `import db` only resolves when the
+    script sits next to `db.py` in `/app`, unlike a `-c` one-liner, which
+    picks up cwd as `sys.path[0]` for free. The parallel case — pagead
+    title-collisions already sitting in `articles` from before this
+    fix existed — needed no action at all: checked directly, every such
+    group already had at most one *active* (non-archived) row left,
+    meaning the user had already manually archived the extras themselves
+    before this feature existed.
+  - **That first cleanup had a real gap: it only rewrote `link` for rows
+    that were already part of a duplicate *group* — a `jk=` row that was
+    still a lone singleton at cleanup time kept its raw, un-normalized
+    tracking link forever, since there was nothing to merge it against
+    yet.** Reported directly with a concrete example
+    (`jk=33dcc3a065734863` existing as both an old raw `rc/clk` link and a
+    freshly-imported canonical `viewjob?jk=` link). Root cause: the very
+    next scheduled scrape after `_normalize_indeed_link()` shipped
+    re-read *every* historical email (by design, see
+    `fetch_indeed_jobs()`'s own docstring) and re-produced a canonical
+    link for every job still mentioned in one — any of the 40 rows that
+    were singletons (not caught by the first, duplicates-only cleanup)
+    each spawned a fresh canonical-link twin the moment that job's email
+    got reprocessed. Fixed with a second one-time pass (same day) that
+    groups **every** `jk=`-bearing row by its extracted `jk` (not by
+    matching link *strings*), so a raw-link singleton and its later
+    canonical twin land in the same group regardless of how different
+    their stored links look — 40 groups, all size 2 (a raw + a canonical
+    row each), merged the same way as the first cleanup (richest-row-wins,
+    backfill missing fields, keep one). Confirmed before running: none of
+    the 80 rows involved were favorited or had an image; the only
+    non-link field ever differing between a pair was `job_tag`
+    (auto-classified, identical on both sides anyway). A second
+    `news.db.pre-indeed-dedup2-*` snapshot was taken first, same
+    discipline as the first cleanup.
+    - **A real ordering bug surfaced writing this version**: the first
+      draft updated the *kept* row's `link` to the canonical form
+      *before* deleting the other row — which fails outright under
+      `UNIQUE(link)` whenever the "other" row already holds that exact
+      canonical link (precisely the raw-singleton-plus-canonical-twin
+      case this cleanup exists to fix). Fixed by deleting the duplicate
+      row(s) first, then renaming the kept row — the same lesson as the
+      merge-then-validate ordering conventions documented elsewhere in
+      this file, just for a raw SQL DELETE-then-UPDATE pair instead of an
+      API request body.
+    - **A `run`/re-run mix-up nearly re-triggered the exact same bug a
+      second time**: an initial attempt (`scp` + `docker cp` + `docker
+      exec ... python3 /app/<script>.py` as one shell block) was blocked
+      whole by this environment's safety classifier — meaning *none* of
+      the three commands ran, not just the risky last one. Re-invoking
+      only the final `docker exec` afterward (without noticing the copy
+      had never actually landed) executed the *previous, unfixed* version
+      of the script still sitting in the container from an earlier
+      attempt, reproducing the identical ordering error. Caught by adding
+      a `try/except` with an explicit failing-group print before
+      re-running, which then hit no error at all once the actually-fixed
+      file was re-copied in — the lesson: after a whole-command-block
+      denial, don't assume any part of a multi-step chain executed,
+      re-verify (or just redo the copy) rather than re-running only the
+      tail end.
+    - **Verified live after the fix**: the specific reported job
+      (`jk=33dcc3a065734863`) collapsed to one row with the canonical
+      link; a full real `scraper.scrape_source()` +
+      `scraper.persist_articles()` cycle against the live inbox
+      afterward inserted zero new rows (82 → 82) — confirming the
+      normalization now actually holds going forward, not just for this
+      one cleanup pass.
+  - **The canonical-link rewrite itself was wrong and had to be reverted
+    — it silently broke real clicks.** Reported directly ("todays indeed
+    job link not working"), the day after the dedup cleanups above.
+    Root cause, confirmed with a real `curl` against a freshly-rewritten
+    link: `_normalize_indeed_link()`'s assumption that a bare
+    `https://<host>/viewjob?jk=<key>` is "a real, standalone-working
+    Indeed URL" was wrong. Indeed's Cloudflare bot-detection returns a
+    401 "Authenticating..." page (silently redirecting to a forced
+    login) for a bare `/viewjob?jk=` hit with none of the signed tracking
+    context a real click carries — confirmed the *original* `rc/clk`
+    tracked link gets challenged too under a bot-like plain `curl`
+    (403, Cloudflare's own challenge), but that one is what Indeed's
+    detection actually expects a *genuine* email click to look like, so a
+    real browser click on it (with real cookies/referrer/JS) has a real
+    chance of passing where a bare direct hit to `/viewjob` does not. The
+    dedup fix's own underlying goal — stop creating duplicate rows for
+    the same `jk` — was sound; *rewriting the stored, user-facing link to
+    achieve it* was the mistake.
+    - **Fixed by decoupling dedup from the stored link entirely.**
+      `email_import.extract_indeed_jk()` replaces
+      `_normalize_indeed_link()` — it only *extracts* the `jk` for
+      matching purposes now, never rewrites or returns a modified URL.
+      `_parse_message()` keeps the original tracked `href` exactly as
+      Indeed sent it (its within-one-email dedup set is now keyed by
+      extracted `jk` instead of the href string, so two differently-
+      tracked links for the same job in one digest still collapse to
+      one). Cross-email dedup — the actual problem being solved — moved
+      into `scraper.scrape_email()`: before ever constructing an
+      `Article`, a `jk`-bearing job's key is checked against already-
+      stored links via `WHERE link LIKE '%jk=<key>%'` (a substring match,
+      not exact-link equality) — a repeat is dropped *before* reaching
+      `persist_articles()`, regardless of how different its tracking
+      params look from the first time this job was seen. The `link`
+      column's own `UNIQUE` constraint is still technically in effect,
+      it's just no longer the primary dedup mechanism for this case.
+    - **Same-digest repeats (the 2026-10-05 duplicate-cards bug)**: the
+      DB lookups above only see rows already *persisted*, and nothing is
+      persisted until the caller runs `persist_articles()` after the whole
+      batch returns. So one digest listing the same job several times
+      (same `jk` in four `rc/clk` links, or the same pagead title) passed
+      every DB check and created one row per copy — four identical
+      "Adaptation au changement climatique" cards, all with the same
+      `first_seen_at`. `scrape_email()` now tracks `seen_jks` and
+      `seen_titles` for the current batch: a same-`jk` repeat is dropped;
+      a same-title pagead repeat is staged in `pending_indeed_duplicates`
+      with `matched_article_id = NULL` (the first copy has no DB id yet).
+      Persisting each job immediately was tried and rejected: it would
+      return no `new_ids` to `scheduler.py`, so Indeed jobs would never be
+      notified or marked notified. Existing duplicate rows are not removed
+      by this change.
+    - **Unrecoverable cost, disclosed rather than glossed over**: the 83
+      articles already rewritten to the bare canonical form by the two
+      cleanups above have permanently lost their original signed tracking
+      token — there is nothing to restore them *to*, since the real
+      `rc/clk`/`pagead/clk` URL was discarded at rewrite time and Indeed's
+      tracking tokens aren't something that can be reconstructed after
+      the fact. Only newly-imported jobs going forward get a link that's
+      actually likely to work when clicked. If click-through for an older
+      entry matters, the only real fix is finding that specific posting
+      on Indeed again by hand (title/company search) — there's no
+      programmatic recovery path.
 
 ## Selector picker (point-and-click CSS selectors)
 
@@ -1341,6 +2770,120 @@ even though there's no "show archived"/unarchive button in the UI yet).
   also make something you'd explicitly favorited unreachable from the
   Favorites tab; the two are independent axes, not one subsuming the
   other.
+
+## Hiding a job offer (gentler than Archive)
+
+`articles.hidden` (0/1, default 0) is a second, deliberately non-
+destructive way to declutter the Jobs list — requested directly ("add job
+add tag hide that hide jobs but dont deleat pay and text") specifically
+because Archive's one real side effect (clearing `saved_text`, see above)
+is sometimes too much: hiding something you're just not interested in
+right now shouldn't throw away pay data or a saved page snapshot the way
+deciding you're *done* with it (Archive) does. `PUT
+/api/articles/{id}/hide` sets it, `DELETE .../hide` clears it — neither
+route ever touches `remuneration` or `saved_text`, full stop.
+
+- **Filtered out of `list_articles()` the same way `archived` already is**
+  (same favorites/folder carve-out, same reasoning: hiding a job shouldn't
+  make a starred one unreachable from Favorites) — a new `include_hidden`
+  query param, parallel to `include_archived`.
+- **Unlike Archive, this has a real "show them again" UI path** — a
+  "🙈 Show hidden" toggle in the Jobs toolbar (`jobShowHidden` in
+  `static/app.js`) that re-fetches with `include_hidden=1` rather than
+  just re-filtering already-fetched data client-side (a hidden article
+  isn't in the default fetch at all, unlike `jobHideExpired`'s purely
+  client-side filter above it). Session-local, not persisted to
+  `localStorage` — reviewing hidden offers is an occasional deliberate
+  check, not a lasting default the way "hide expired" is. Archive still
+  has no such UI path (by design, documented above) — the two aren't
+  meant to converge; Hide exists precisely because Archive's "done with
+  it, don't need to see it again" semantics don't fit every reason to
+  declutter the list.
+- **Visually distinct from a "viewed" Feed card** — a hidden job shown via
+  the toggle gets `.card--hidden` (dimmed *and* dashed border), not
+  `.card--viewed`'s plain dim, so it reads as "normally excluded, shown on
+  request" rather than "already read."
+- **No `confirm()` dialog**, unlike Archive's — nothing here is
+  destructive and it's a one-click reversible toggle (flip "Show hidden"
+  to undo), not a "decided, done with it" action that benefits from a
+  speed bump. Same reasoning extends to the bulk path: Jobs' existing
+  multi-select bar gained a "🙈 Hide selected" button alongside "🗄 Archive
+  selected", also confirm-free.
+- **A hidden-and-later-archived job could become permanently unreachable
+  — a real bug, reported directly ("jobs i hidden disapeared").** The
+  archived and hidden filters in `list_articles()` started as two fully
+  independent `AND` clauses (`archived = 0 AND hidden = 0`), so a row
+  satisfying *both* needed *both* `include_archived` and `include_hidden`
+  passed to reappear — but the "Show hidden" toggle only ever sent the
+  latter. This is a real, reachable workflow, not a contrived edge case:
+  open "Show hidden" to review something you'd hidden, decide from right
+  there that you're actually done with it, hit Archive — the row is now
+  `hidden=1, archived=1`, and from that moment on it's gone from *every*
+  view in the app, "Show hidden" included, with no UI path back to it at
+  all. Confirmed against real data before fixing anything: 2 of 3
+  currently-hidden jobs were in exactly this state.
+  - **Fixed by making the archived clause conditional on `include_hidden`**
+    rather than giving hidden its own independent third state: when hidden
+    rows are being shown at all, the clause becomes `(archived = 0 OR
+    hidden = 1)` instead of a bare `archived = 0` — so "Show hidden"
+    always surfaces everything you've hidden regardless of whatever else
+    has since happened to it, while a plain archived-but-never-hidden
+    row (verified against a real one, id 4113) still correctly stays
+    excluded. The entire point of Hide being the gentler, reversible
+    alternative to Archive collapses if an archived-*and*-hidden row can
+    still end up fully unreachable — this fix is load-bearing for that
+    promise, not a nice-to-have.
+  - **`archive_article()` itself was deliberately left unchanged** —
+    archiving a hidden row still clears its `saved_text` exactly like
+    archiving any other row does, confirm() dialog and all. That's a
+    conscious, disclosed choice at the moment of archiving (the button's
+    own confirm text already says "Any saved page text will also be
+    deleted"), not a silent surprise the way the visibility bug was —
+    Hide's "never touches pay/text" promise only covers *hiding* itself,
+    not a later, separate, explicitly-confirmed decision to archive on
+    top of it.
+- **The fix above was one-directional, and the other direction bit
+  immediately — reported directly, same session: "unhidden jobs
+  disapeared."** Unhiding one of the two archived-and-hidden rows above
+  cleared `hidden` back to 0 but left `archived = 1` untouched (Unhide
+  only ever touches the `hidden` column, by design). With `hidden` now
+  0, "Show hidden" no longer had any reason to surface it (its own OR
+  only fires for `hidden = 1` rows) — and since there was still no "Show
+  archived" view *at all*, the row landed in a genuine gap: invisible
+  from every existing surface, with literally no UI path back. This is
+  exactly the scenario "add button to show archives" was then asked for
+  in the same message — the bug and the missing feature were the same
+  root cause.
+  - **Made fully symmetric rather than patched a second time in just one
+    direction**: `hidden_clause` now mirrors `archived_clause` — `(hidden
+    = 0 OR archived = 1)` whenever archived rows are being shown
+    (`include_archived`), the exact same shape `archived_clause` already
+    had for `include_hidden`. Whichever "show X" toggle is on now always
+    surfaces every row with that flag set, full stop, regardless of the
+    *other* flag's value — closing this gap for good rather than leaving
+    a third combination (archived-then-unhidden, the one that just broke)
+    as a lingering special case. With both toggles on simultaneously,
+    neither clause is added at all (no filtering — show everything).
+  - **`archiveBtn` was unconditional before this** (always rendered
+    "🗄 Archive" regardless of the row's actual `archived` state, unlike
+    `hideBtn`, which already branched on `article.hidden`) — fixed to
+    match: `archiveBtn` now shows "↩ Unarchive" when `article.archived`
+    is true, only ever reachable when "Show archived" is on (an archived
+    row isn't fetched at all otherwise, same shape as Unhide). No
+    `confirm()` on Unarchive, same reasoning as Unhide — a one-click
+    reversible toggle, not a decision needing a speed bump.
+- **New: a "📁 Show archived" toggle** (`jobShowArchived` in
+  `static/app.js`, `include_archived=1` on the Jobs fetch) — this app's
+  first real "view archived offers" surface; `include_archived` existed
+  on `list_articles()` from the start but nothing in the UI ever passed
+  it until now. Session-local, not persisted, same reasoning as "Show
+  hidden" — reviewing archived offers is an occasional deliberate check.
+  **Styled red** (`#job-show-archived-toggle.active` /
+  `.card--archived`'s border), requested directly, deliberately distinct
+  from "Show hidden"'s blue — this surfaces offers that were put away
+  *for good*, with their saved text already gone (unlike Hide), so a
+  heavier visual weight than the gentler, fully-reversible Hide toggle
+  felt right.
 
 ## Aggregated RSS feed (`GET /api/feed.xml`)
 

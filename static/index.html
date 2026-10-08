@@ -12,6 +12,7 @@
     <button class="tab-btn active" data-view="feed">Feed</button>
     <button class="tab-btn" data-view="favorites">Favorites</button>
     <button class="tab-btn" data-view="jobs">Jobs</button>
+    <button class="tab-btn" data-view="analysis">Data Analysis</button>
     <button class="tab-btn" data-view="sources">Sources</button>
     <button class="tab-btn" data-view="settings">Settings</button>
     <button class="tab-btn" data-view="debug">Debug</button>
@@ -23,6 +24,8 @@
       <div class="toolbar">
         <button id="run-now-btn">Check for news now</button>
         <span id="run-now-status" class="hint"></span>
+        <input type="search" id="feed-search" class="search-input" placeholder="Search titles…">
+        <button id="feed-unread-toggle" title="Show only articles you haven't viewed">👁 Non lu</button>
         <div class="spacer"></div>
         <div class="view-toggle" id="size-toggle">
           <button class="view-toggle-btn" data-size="small" title="Small cards">S</button>
@@ -63,18 +66,33 @@
       <div class="toolbar">
         <button id="job-run-now-btn">Check for jobs now</button>
         <span id="job-run-now-status" class="hint"></span>
+        <input type="search" id="job-search" class="search-input" placeholder="Search titles…">
+        <button id="job-hide-expired-toggle" title="Hide offers whose application deadline has already passed">⏰ Hide expired</button>
+        <button id="job-show-hidden-toggle" title="Show offers you've hidden (pay/saved text are kept, unlike Archive)">🙈 Show hidden</button>
+        <button id="job-show-archived-toggle" title="Show offers you've archived (pay/saved text are not kept)">📁 Show archived</button>
         <div class="spacer"></div>
         <div class="view-toggle" id="job-view-toggle">
           <button class="view-toggle-btn active" data-view="list">List</button>
           <button class="view-toggle-btn" data-view="calendar">📅 Deadlines</button>
         </div>
+        <div class="view-toggle" id="job-group-toggle" title="Quick-filter by source group">
+          <button class="view-toggle-btn active" data-group="">All</button>
+          <button class="view-toggle-btn" data-group="PhD">PhD</button>
+          <button class="view-toggle-btn" data-group="ComSci">ComSci</button>
+        </div>
+        <button id="job-select-toggle-btn">☑ Select</button>
+        <button id="job-archive-selected-btn" style="display:none">🗄 Archive selected (<span id="job-selected-count">0</span>)</button>
+        <button id="job-hide-selected-btn" style="display:none">🙈 Hide selected</button>
+        <button id="job-stats-btn">📊 Pay stats</button>
+        <button id="job-new-tag-btn">+ New tag</button>
+        <button id="job-review-duplicates-btn" style="display:none">⚠ Review duplicates (<span id="job-review-duplicates-count">0</span>)</button>
         <a class="btn" href="/api/digest.html" target="_blank">Download full digest</a>
-        <a class="btn" href="/api/feed.xml" target="_blank" title="Subscribe in any RSS reader">📡 RSS feed</a>
+        <a class="btn" href="/api/jobs-feed.xml" target="_blank" title="Subscribe in any RSS reader (job/thesis offers only)">📡 RSS feed</a>
       </div>
       <details id="job-filters" class="filter-menu">
         <summary><span class="chevron">&#9656;</span> Filters</summary>
         <div id="job-chips" class="chips"></div>
-        <p class="hint" style="margin: 4px 0;">Click a tag below to hide/show it (opposite of the source chips above) — Fellowship, Internship, Physicist, Post-Doc, and Professorship are hidden by default.</p>
+        <p class="hint" style="margin: 4px 0;">Click a tag below to hide/show it (opposite of the source chips above) — Fellowship, Internship, Physicist, Post-Doc, and Professorship are hidden by default. This is saved per browser, so clicking one persists across visits — <button id="job-tag-reset-btn" class="link-btn">reset to default</button> if a tag you expect to be hidden (or shown) isn't.</p>
         <div id="job-tag-chips" class="chips"></div>
       </details>
       <div id="job-list-view">
@@ -91,6 +109,99 @@
         </div>
         <div id="job-cal-grid" class="cal-grid"></div>
         <div id="job-cal-empty" class="empty-state" style="display:none">No job/thesis offers have a known application deadline yet.</div>
+      </div>
+    </section>
+
+    <!-- DATA ANALYSIS (Jobs-side analytics: pay stats, volume by source, offers over time) -->
+    <section id="view-analysis" class="view">
+      <div class="toolbar">
+        <button id="analysis-refresh-btn">Refresh</button>
+        <label class="hint" for="analysis-bin-size" style="margin-left: 10px;">Pay bin (€)</label>
+        <input type="number" id="analysis-bin-size" min="1" step="100" style="width: 90px">
+        <label class="hint" for="analysis-granularity" style="margin-left: 10px;">Time bucket</label>
+        <select id="analysis-granularity">
+          <option value="week">Week</option>
+          <option value="month">Month</option>
+          <option value="quarter">Quarter</option>
+        </select>
+        <span id="analysis-status" class="hint"></span>
+      </div>
+
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Pay by tag</h3>
+        <p class="hint">
+          Archived offers are excluded, like every other chart on this page --
+          this tracks the active pipeline, not a retrospective pay archive (the
+          "📊 Pay stats" popup in the Jobs tab is the one place that still
+          includes archived offers, by design). "Untagged" and the 5 tags
+          hidden by default in the Jobs tab (Fellowship, Internship, Physicist,
+          Post-Doc, Professorship) are excluded here too. Best-effort: remuneration is
+          either scraped (title/excerpt only, so most listings won't have one)
+          or entered by hand via a job card's "+ Pay" / "✎" button. Figures are
+          always normalized to an annual amount first -- a per-month entry is
+          multiplied by 12 before averaging. Each histogram bins that tag's own
+          offers into fixed 500-wide pay ranges (its own min–max, not a shared
+          scale across tags), with a normal (Gaussian) curve fit to the same
+          mean/std dev overlaid -- how closely the bars hug the curve is itself
+          informative (a tight fit suggests pay here genuinely clusters around
+          one typical figure; a poor fit suggests several distinct pay tiers
+          lumped under one tag). Variance/std dev need at least 2 values to
+          mean anything and show "—" otherwise.
+        </p>
+        <div id="analysis-pay-charts"></div>
+      </div>
+
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Pay by city</h3>
+        <p class="hint">
+          Mean pay per city (only cities with at least one parseable pay value
+          are shown). No curve here -- city is a category with no natural
+          order, same reasoning as Offers by tag/Volume by source below.
+        </p>
+        <div id="analysis-pay-by-city"></div>
+      </div>
+
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Offers by tag</h3>
+        <p class="hint">
+          Same tag exclusions as Pay by tag above ("Untagged" plus the 5 tags
+          hidden by default in Jobs). How many job/thesis offers fall under each tag in total, archived
+          included. No curve fit here -- tags are categories with no natural
+          order, so there's no continuous axis for a curve to follow the way
+          there is for a histogram or a time series.
+        </p>
+        <div id="analysis-tag-distribution"></div>
+      </div>
+
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Volume by source</h3>
+        <p class="hint">How many offers each job source has contributed in total. Same "no curve, categories aren't ordered" reasoning as Offers by tag.</p>
+        <div id="analysis-source-volume"></div>
+      </div>
+
+      <div class="card-form" style="margin-bottom: 20px;">
+        <h3>Offers over time</h3>
+        <p class="hint">
+          Monthly count of offers *dated* that month (each offer's own
+          pub_date -- its listed posting date, or "now" as a fallback for a
+          source with no real date). A quadratic trend curve (least-squares
+          fit, not a moving average) is overlaid to show the broad direction
+          independent of month-to-month noise.
+        </p>
+        <div id="analysis-time-series"></div>
+      </div>
+
+      <div class="card-form">
+        <h3>New jobs over time</h3>
+        <p class="hint">
+          Monthly count of offers this app *first scraped* that month
+          (first_seen_at -- never defaulted or backfilled, always the real
+          discovery moment) -- a different question from "Offers over time"
+          above: this tracks the scraper's own discovery activity, not when
+          postings themselves claim to be dated. The two can disagree a lot
+          for a source with real (possibly old) listing dates.
+        </p>
+        <div id="analysis-new-jobs-time"></div>
       </div>
     </section>
 

@@ -10,6 +10,7 @@ only the source of configuration changed, from SOURCES[...] to DB rows.
 
 import re
 import json
+import html
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -21,10 +22,17 @@ import soupsieve as sv
 from bs4 import BeautifulSoup
 
 import db
+import email_import
 
 logger = logging.getLogger("news_bot.scraper")
 
 MAX_ARTICLES_PER_FETCH = 10
+# A source's very first scrape (sources.last_checked_at still NULL, the
+# same column _record_source_health stamps on every run -- no separate
+# tracking needed) pulls a deeper backlog than routine runs do, so a newly
+# added source starts with real history instead of just whatever happened
+# to be the 10 most recent items the day it was added.
+FIRST_SCRAPE_LIMIT = 50
 REQUEST_TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (compatible; NewsScraperBot/1.0)"
 
@@ -78,6 +86,44 @@ def classify_article(title: str) -> str:
     return DEFAULT_CONTENT_TAG
 
 
+# Best-effort salary/remuneration extraction for category="job" articles --
+# only title + excerpt are ever available at scrape time (a css source has
+# no body text at all; even rss/inspirehep's excerpt is a short blurb, not
+# the full posting), so this only ever catches a listing that happens to
+# advertise pay right there rather than "see the full posting" -- expected
+# to have partial coverage, not universal. That's why this is paired with
+# a manual edit control in the UI (PUT /api/articles/:id/remuneration) --
+# the reliable path is the user filling it in themselves; extraction is a
+# head start, not the whole feature. Stored as the matched *text* verbatim
+# (not a parsed number) since a range ("35 000 - 40 000 €") or a currency/
+# period ("brut annuel", "per year") carries real information a bare
+# number would lose -- GET /api/jobs/stats does its own separate, cruder
+# numeric parse of whatever's stored (manual or extracted) when it needs an
+# actual average.
+_REMUNERATION_NUM = r"\d{1,3}(?:[\s.,]\d{3})+|\d+\s*[kK]"
+_REMUNERATION_CUR = r"€|£|\$"
+_REMUNERATION_SUFFIX = (
+    r"(?:brut|net|annuel(?:le)?|annually|annual|mensuel(?:le)?|/\s*an|/\s*mois|"
+    r"/\s*year|/\s*month|per\s*year|per\s*month|p\.?a\.?)"
+)
+REMUNERATION_RE = re.compile(
+    rf"(?:{_REMUNERATION_CUR})?\s*(?:{_REMUNERATION_NUM})\s*(?:{_REMUNERATION_CUR})?"
+    rf"(?:\s*(?:-|–|to|à)\s*(?:{_REMUNERATION_CUR})?\s*(?:{_REMUNERATION_NUM})\s*(?:{_REMUNERATION_CUR})?)?"
+    rf"(?:\s*{_REMUNERATION_SUFFIX}){{0,2}}",
+    re.I,
+)
+
+
+def extract_remuneration(*texts: str | None) -> str | None:
+    for text in texts:
+        if not text:
+            continue
+        match = REMUNERATION_RE.search(text)
+        if match and any(c.isdigit() for c in match.group(0)):
+            return re.sub(r"\s+", " ", match.group(0)).strip()
+    return None
+
+
 # --------------------------------------------------------------------------
 # JOB TAGS (user-editable title classification for category="job" sources)
 # --------------------------------------------------------------------------
@@ -100,6 +146,20 @@ def get_job_tags() -> list[dict]:
         return [{"id": r["id"], "name": r["name"], "keywords": json.loads(r["keywords"])} for r in rows]
     finally:
         conn.close()
+
+
+# Auto-archived the moment a job is classified into one of these tags --
+# requested directly ("by default... should be archived") after a one-time
+# manual bulk-archive (see CLAUDE.md) kept needing to be redone as new
+# low-signal offers were scraped, and after the client-side hidden-tags
+# filter (a per-browser localStorage toggle) proved too easy to silently
+# diverge from. This makes the policy a real, permanent server-side rule
+# instead: applied in persist_articles() at insert time and in
+# retag_jobs() when a keyword change reclassifies an existing row into one
+# of these tags. Deliberately one-directional -- it never *un*-archives a
+# row whose tag changes away from this set, since that could silently
+# undo an archive decision made for an unrelated reason.
+AUTO_ARCHIVE_JOB_TAGS = {"Internship", "Professorship", "Physicist", "Fellowship", "Post-Doc"}
 
 
 def classify_job(title: str, job_tags: list[dict]) -> str | None:
@@ -153,15 +213,30 @@ def retag_jobs() -> int:
     conn = db.get_conn()
     try:
         rows = conn.execute(
-            "SELECT articles.id, articles.title, sources.forced_job_tag FROM articles "
+            "SELECT articles.id, articles.title, articles.job_tag, articles.job_tags, "
+            "sources.forced_job_tag FROM articles "
             "JOIN sources ON sources.id = articles.source_id "
             "WHERE sources.category = 'job'"
         ).fetchall()
         if not rows:
             return 0
+        updates = []
+        for r in rows:
+            new_tag = r["forced_job_tag"] or classify_job(r["title"], job_tags)
+            manual = json.loads(r["job_tags"]) if r["job_tags"] is not None else None
+            if manual is not None and r["job_tag"] and r["job_tag"] in manual and new_tag != r["job_tag"]:
+                # Swap the old auto tag for the new one inside a manual list,
+                # so a retag never silently drops tags the user added by hand.
+                manual = [new_tag if t == r["job_tag"] else t for t in manual]
+                manual = list(dict.fromkeys(t for t in manual if t))
+            updates.append((new_tag, json.dumps(manual) if manual is not None else None,
+                             new_tag in AUTO_ARCHIVE_JOB_TAGS, r["id"]))
+        # archived only ever flips 0 -> 1 here (MAX keeps a 1 from an earlier,
+        # unrelated archive decision), never back to 0 -- see AUTO_ARCHIVE_JOB_TAGS.
         conn.executemany(
-            "UPDATE articles SET job_tag = ? WHERE id = ?",
-            [(r["forced_job_tag"] or classify_job(r["title"], job_tags), r["id"]) for r in rows],
+            "UPDATE articles SET job_tag = ?, job_tags = COALESCE(?, job_tags), "
+            "archived = MAX(archived, ?) WHERE id = ?",
+            updates,
         )
         conn.commit()
         return len(rows)
@@ -183,6 +258,8 @@ class Article:
         category: str | None = None,
         forced_job_tag: str | None = None,
         excerpt: str | None = None,
+        remuneration: str | None = None,
+        city: str | None = None,
     ):
         self.title = title.strip()
         self.link = link.strip()
@@ -195,11 +272,24 @@ class Article:
         # sources (see extract_excerpt()) -- None for every kind="css"
         # source, which has no body text on the page to draw one from.
         self.excerpt = excerpt.strip() if excerpt else None
+        # Best-effort, see extract_remuneration() -- only attempted for
+        # category="job" (a news article has no reason to carry a salary
+        # field, and running the regex over every physics-news title would
+        # just be wasted work for a value nothing ever reads there).
+        self.remuneration = remuneration or (
+            extract_remuneration(self.title, self.excerpt) if category == "job" else None
+        )
         # Application deadline for a job/thesis offer -- see sources.deadline_selector.
         # Unrelated to pub_date (when the *listing* was posted); this is when it
         # *closes*. Only ever set for category="job" sources that expose one
         # (most don't), None everywhere else.
         self.deadline = deadline
+        # Free-text job location (e.g. "Nantes - 44") -- see
+        # sources.location_selector. Stored verbatim, same "don't over-parse
+        # a free-text field" reasoning as remuneration (a department code
+        # suffix is real information a bare city name would lose). Most
+        # sources don't expose one; None there, same as deadline.
+        self.city = city.strip() if city else None
         # The source's category ("job", "website", ...) -- carried through
         # only so persist_articles() knows whether to run job-tag
         # classification (see classify_job()); not itself persisted onto the
@@ -253,6 +343,8 @@ def fetch_bytes(url: str, user_agent: str = USER_AGENT, quiet: bool = False) -> 
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
 MEDIA_NS = "{http://search.yahoo.com/mrss/}"
 CONTENT_NS = "{http://purl.org/rss/1.0/modules/content/}"
+DC_NS = "{http://purl.org/dc/elements/1.1/}"
+RSS1_NS = "{http://purl.org/rss/1.0/}"
 
 BARE_AMPERSAND_RE = re.compile(rb"&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)")
 
@@ -264,12 +356,40 @@ def normalize_image_url(src: str) -> str:
 
 
 def first_img_src(html: str | None) -> str | None:
-    """Pull the first <img src> out of an HTML fragment (e.g. an item's
-    content:encoded or description), for feeds with no dedicated image tag."""
+    """Pull the *largest* <img src> out of an HTML fragment (e.g. an item's
+    content:encoded or description), for feeds with no dedicated image tag.
+
+    Despite the name (kept for the two existing callers' sake -- derive_title
+    doesn't care about size, and this is still "the first/best guess"), this
+    is NOT simply the first <img> in document order -- SPIP (the CMS behind
+    several IN2P3 lab sites: LPNHE confirmed directly, likely others sharing
+    the same theme) auto-inserts a small ~110x42 "spip_logo" icon at the very
+    top of every article's content, *before* any real photo further down.
+    Picking the first <img> unconditionally grabbed that icon instead of the
+    actual, much larger (e.g. 500x684) content photo sitting right after it
+    in the same feed item -- confirmed by inspecting LPNHE's raw feed
+    directly, not guessed. Now picks whichever <img> has the largest
+    width*height (parsed from its own attributes, no network fetch needed);
+    an image with no size attributes at all is treated as area 0, so a
+    feed that provides dimensions on its real photo but not its icon (or
+    vice versa) is still handled correctly, and a feed where *no* image
+    anywhere has dimensions just falls back to the first one, same as
+    before this fix -- no worse than the old behavior in that case, only
+    better once real size info exists."""
     if not html:
         return None
-    img = BeautifulSoup(html, "html.parser").find("img")
-    src = img.get("src", "").strip() if img else ""
+    imgs = BeautifulSoup(html, "html.parser").find_all("img")
+    if not imgs:
+        return None
+
+    def area(img) -> int:
+        try:
+            return int(img.get("width", 0)) * int(img.get("height", 0))
+        except (ValueError, TypeError):
+            return 0
+
+    best = max(imgs, key=area) if any(area(i) for i in imgs) else imgs[0]
+    src = best.get("src", "").strip()
     return normalize_image_url(src) if src else None
 
 
@@ -302,11 +422,12 @@ def derive_title(description_html: str | None) -> str:
 
 def extract_excerpt(description_html: str | None) -> str | None:
     """A short plain-text blurb for an article, from an RSS item's
-    <description> or an Atom entry's <summary>/<content> -- only ever
-    available for kind="rss" sources; kind="css" sources have no body
-    text on the page at all (see "Content tagging" above for the same
-    limitation already documented for classify_article()), so their
-    articles simply have no excerpt rather than a fabricated one."""
+    <description>, an Atom entry's <summary>/<content>, or (since
+    scrape_inspirehep) InspireHEP's own JSON `description` field -- every
+    kind="css" source has no body text on the page at all to draw one from
+    (see "Content tagging" above for the same limitation already
+    documented for classify_article()), so their articles simply have no
+    excerpt rather than a fabricated one."""
     text = html_to_text(description_html, EXCERPT_MAX_LEN)
     return text or None
 
@@ -325,6 +446,21 @@ def extract_rss_image(item: ET.Element) -> str | None:
         url = (enclosure.get("url") or "").strip()
         return normalize_image_url(url) if url else None
 
+    # A plain, no-namespace <image> child -- not part of any RSS spec at
+    # the item level (only the *channel*'s own logo, per RSS 0.91/2.0), but
+    # CERN Courier's WordPress feed adds one per item anyway as its real
+    # featured-image field -- confirmed on 160/160 real items, always a
+    # genuine "frontis"-style article photo, never blank. Checked before
+    # falling back to guessing from body content: a feed that bothers to
+    # provide this explicitly is a more reliable signal than picking the
+    # largest <img> out of the article body, which can just as easily be
+    # an unrelated advertiser's logo sitting in the content (seen on a real
+    # CERN Courier item: the only in-body <img> was an MDPI sponsor logo,
+    # completely unrelated to the actual article).
+    image_tag = item.findtext("image")
+    if image_tag and image_tag.strip():
+        return normalize_image_url(image_tag.strip())
+
     return first_img_src(item.findtext(f"{CONTENT_NS}encoded")) or first_img_src(
         item.findtext("description")
     )
@@ -341,7 +477,8 @@ def parse_rss_date(text: str | None) -> datetime | None:
 
 
 def parse_feed_items(content: bytes):
-    """Yield dicts with title/link/pub_date/image from RSS 2.0 or Atom feed bytes."""
+    """Yield dicts with title/link/pub_date/image from RSS 2.0, RSS 1.0/RDF,
+    or Atom feed bytes."""
     # Some feeds ship literal "&" instead of "&amp;" in item text, which is
     # invalid XML and makes ET.fromstring reject the whole document -- patch
     # just the bare ampersands before parsing.
@@ -362,6 +499,46 @@ def parse_feed_items(content: bytes):
                     "pub_date": parse_rss_date(item.findtext("pubDate")),
                     "image": extract_rss_image(item),
                     "excerpt": extract_excerpt(item.findtext("description")),
+                }
+        return
+
+    # RSS 1.0/RDF: <item> lives as a direct child of the root <rdf:RDF>
+    # (a sibling of <channel>, not nested inside it like RSS 2.0), *and*
+    # RDF feeds declare a bare `xmlns="http://purl.org/rss/1.0/"` default
+    # namespace on the root -- meaning every unprefixed element (item,
+    # title, link, description alike) actually needs the RSS1_NS prefix
+    # for ElementTree to find it at all; a plain "item"/"title" lookup
+    # (which works fine for ordinary RSS 2.0, since those feeds don't
+    # declare a default namespace) silently matches nothing here. The date
+    # is Dublin Core's <dc:date> (real ISO 8601, e.g.
+    # "2026-09-24T10:00:00+00:00") instead of RFC 822 <pubDate>. Hit for
+    # real on APS Physics Magazine's feed (feeds.aps.org) -- confirmed by
+    # inspecting that feed directly (including the first, wrong attempt at
+    # this fix, which used unprefixed lookups and silently found nothing),
+    # not assumed from the RDF spec alone.
+    items = root.findall(f"./{RSS1_NS}item")
+    if items:
+        for item in items:
+            title = (item.findtext(f"{RSS1_NS}title") or "").strip()
+            link = (item.findtext(f"{RSS1_NS}link") or "").strip()
+            if not title:
+                title = derive_title(item.findtext(f"{RSS1_NS}description"))
+            if title and link:
+                pub_date = None
+                date_text = item.findtext(f"{DC_NS}date")
+                if date_text:
+                    try:
+                        pub_date = datetime.fromisoformat(date_text.strip())
+                        if not pub_date.tzinfo:
+                            pub_date = pub_date.replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        pub_date = None
+                yield {
+                    "title": title,
+                    "link": link,
+                    "pub_date": pub_date,
+                    "image": extract_rss_image(item),
+                    "excerpt": extract_excerpt(item.findtext(f"{RSS1_NS}description")),
                 }
         return
 
@@ -392,7 +569,7 @@ def parse_feed_items(content: bytes):
             }
 
 
-def scrape_rss(source: "sqlite3.Row") -> list[Article]:
+def scrape_rss(source: "sqlite3.Row", limit: int = MAX_ARTICLES_PER_FETCH) -> list[Article]:
     user_agent = source["user_agent"] or USER_AGENT
     content = fetch_bytes(source["url"], user_agent)
     if not content:
@@ -413,6 +590,15 @@ def scrape_rss(source: "sqlite3.Row") -> list[Article]:
         except ET.ParseError as e2:
             raise ScrapeError(f"Feed did not parse: {e2}")
 
+    # Same optional noise filter scrape_css applies (see its own comment for
+    # why it's a regex checked before capping to `limit`, not after) -- an
+    # RSS feed can just as easily mix relevant and irrelevant items as a CSS
+    # listing page (e.g. ESA's jobs feed has no working topic filter of its
+    # own, so every posting comes through and this is the only filter that
+    # actually narrows it down).
+    if source["title_filter"]:
+        entries = [e for e in entries if re.search(source["title_filter"], e["title"], re.I)]
+
     return [
         Article(
             title=entry["title"],
@@ -425,7 +611,7 @@ def scrape_rss(source: "sqlite3.Row") -> list[Article]:
             forced_job_tag=source["forced_job_tag"],
             excerpt=entry.get("excerpt"),
         )
-        for entry in entries[:MAX_ARTICLES_PER_FETCH]
+        for entry in entries[:limit]
     ]
 
 
@@ -608,7 +794,130 @@ def resolve_url(href: str, base_url: str) -> str:
     return base_url.rstrip("/") + "/" + href.lstrip("/")
 
 
-def scrape_css(source: "sqlite3.Row") -> list[Article]:
+JET_ENGINE_SETTINGS_RE = re.compile(r'data-nav="([^"]*)"')
+JET_ENGINE_QUERIED_ID_RE = re.compile(r'data-queried-id="([^"]+)"')
+JET_ENGINE_PAGES_RE = re.compile(r'data-pages="(\d+)"')
+JET_ENGINE_GRID_WIDGET_RE = re.compile(
+    r'class="[^"]*elementor-widget-jet-listing-grid[^"]*"[^>]*data-id="([0-9a-f]+)"'
+)
+
+
+def _php_form_fields(prefix: str, value, out: list[tuple[str, str]]) -> None:
+    """Flattens a Python value (from JSON) into PHP/WordPress's bracket-array
+    form-encoding (key[sub]=..., key[]=... per list item) -- the shape
+    JetEngine's own frontend JS sends its AJAX pagination requests in (see
+    _fetch_jetengine_extra_pages). A JSON boolean becomes the literal string
+    "true"/"false" (not Python's True/False, and not dropped) since that's
+    what the real browser-sent payload contains for e.g. widget_settings
+    fields like "inline_columns_css":false -- confirmed against a real
+    captured request, not assumed."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _php_form_fields(f"{prefix}[{k}]", v, out)
+    elif isinstance(value, list):
+        for item in value:
+            _php_form_fields(f"{prefix}[]", item, out)
+    elif isinstance(value, bool):
+        out.append((prefix, "true" if value else "false"))
+    elif value is None:
+        out.append((prefix, ""))
+    else:
+        out.append((prefix, str(value)))
+
+
+def _fetch_jetengine_extra_pages(page1_html: str, source: "sqlite3.Row") -> list:
+    """For sources.paginate=1: JetEngine's "Load More" listing widget (used
+    by both the Chambéry and Lyon 1 job sources so far) never puts page 2+
+    in a real URL at all -- everything past page 1 only exists behind a
+    same-origin AJAX POST (action=jet_engine_ajax, handler=listing_load_more)
+    whose payload is almost entirely the widget's own settings, verbatim.
+    Rather than hand-guess that payload (tried once, 404'd -- see CLAUDE.md's
+    "Still page-1-only" note this superseded), every value needed is
+    extracted fresh from page 1's own HTML on every scrape:
+      - the `query`/`widget_settings` dicts, from the listing wrapper's own
+        `data-nav="..."` JSON blob (HTML-entity-escaped) -- confirmed by
+        inspecting a real page: this is the *exact* JSON the widget's own
+        JS reads to build its request, so replaying it back is inherently
+        correct, not a guess. Not `data-settings` (a much more generic
+        attribute used all over an Elementor page for unrelated widgets) --
+        an easy mix-up caught only by re-checking the real HTML byte for
+        byte after the first regex silently matched nothing.
+      - `page_settings.queried_id`, from the listing wrapper's own
+        `data-queried-id="331|WP_Post"`-shaped attribute.
+      - `page_settings.element_id`, from the *widget's own* Elementor
+        `data-id` (the `elementor-widget-jet-listing-grid` div) -- a
+        different id than `widget_settings._element_id` (a fixed JetEngine
+        string like "joblisting-list"), easy to conflate.
+      - total page count, from `data-pages="N"` on the same wrapper.
+    Verified this actually works with a real request (dropping the
+    session cookie a browser capture included -- turned out unnecessary,
+    this endpoint needs no auth/session at all) before relying on it here,
+    not assumed from the payload shape alone.
+
+    Returns every page-2+ container matching source["article_selector"],
+    to be appended to page 1's own containers. Never raises -- a paginated
+    source that fails to extract/fetch extra pages still returns whatever
+    page 1 alone gave scrape_css, same graceful-degradation shape as every
+    other optional field on a source."""
+    settings_match = JET_ENGINE_SETTINGS_RE.search(page1_html)
+    queried_id_match = JET_ENGINE_QUERIED_ID_RE.search(page1_html)
+    element_id_match = JET_ENGINE_GRID_WIDGET_RE.search(page1_html)
+    pages_match = JET_ENGINE_PAGES_RE.search(page1_html)
+    if not (settings_match and queried_id_match and element_id_match and pages_match):
+        logger.warning(
+            f"{source['name']}: paginate=1 but couldn't find JetEngine's load-more "
+            "settings on page 1 -- the page's markup may have changed. Scraping page 1 only."
+        )
+        return []
+
+    total_pages = int(pages_match.group(1))
+    if total_pages <= 1:
+        return []
+
+    try:
+        settings = json.loads(html.unescape(settings_match.group(1)))
+        query, widget_settings = settings["query"], settings["widget_settings"]
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"{source['name']}: couldn't parse JetEngine's embedded settings JSON: {e}")
+        return []
+
+    queried_id = queried_id_match.group(1)
+    element_id = element_id_match.group(1)
+    listing_id = widget_settings.get("lisitng_id", "")  # sic -- real typo'd field name in the payload
+    user_agent = source["user_agent"] or USER_AGENT
+
+    extra: list = []
+    for page_num in range(2, total_pages + 1):
+        fields: list[tuple[str, str]] = [("action", "jet_engine_ajax"), ("handler", "listing_load_more")]
+        _php_form_fields("query", query, fields)
+        _php_form_fields("widget_settings", widget_settings, fields)
+        _php_form_fields(
+            "page_settings",
+            {"post_id": False, "queried_id": queried_id, "element_id": element_id, "page": page_num},
+            fields,
+        )
+        fields += [("listing_type", "false"), ("isEditMode", "false"), ("addedPostCSS[]", listing_id)]
+
+        try:
+            resp = requests.post(
+                source["url"].split("?")[0] + "?nocache=1",
+                data=fields,
+                headers={"X-Requested-With": "XMLHttpRequest", "User-Agent": user_agent},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            page_html = resp.json()["data"]["html"]
+        except (requests.RequestException, ValueError, KeyError) as e:
+            logger.warning(f"{source['name']}: page {page_num} of {total_pages} failed to load: {e}")
+            break
+
+        page_soup = BeautifulSoup(page_html, "html.parser")
+        extra.extend(page_soup.select(source["article_selector"]))
+
+    return extra
+
+
+def scrape_css(source: "sqlite3.Row", limit: int = MAX_ARTICLES_PER_FETCH) -> list[Article]:
     """Scrape a single CSS-selector-configured source, most recent first
     (order as they appear on the page)."""
     user_agent = source["user_agent"] or USER_AGENT
@@ -618,9 +927,24 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
 
     soup = BeautifulSoup(html, "html.parser")
     containers = soup.select(source["article_selector"])
+    if source["paginate"]:
+        containers = containers + _fetch_jetengine_extra_pages(html, source)
 
     articles: list[Article] = []
-    for container in containers[:MAX_ARTICLES_PER_FETCH]:
+    for container in containers:
+        if len(articles) >= limit:
+            # Capping the *matching* count, not the raw container count --
+            # with a title_filter set, a relevant posting could easily sit
+            # past the page's first `limit` raw entries (a busy listing
+            # page, most of it irrelevant). Slicing containers up front,
+            # before filtering, would silently never see anything past
+            # that point; scanning everything and capping the kept results
+            # instead means a filtered source actually finds its matches
+            # wherever they are on the page, not just among the first few.
+            # For a source with no title_filter this is a no-op -- every
+            # container matches, so it still stops at the same `limit`'th
+            # one, same order as before.
+            break
         # A blank title/link_selector means "the article container itself is
         # the title/link element" -- some listing pages have no wrapping
         # element around a bare <a> for select_one() to find as a descendant
@@ -634,6 +958,20 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
             continue
 
         title = title_el.get_text(strip=True)
+
+        # Optional per-source noise filter for a listing page that mixes
+        # relevant and irrelevant postings (e.g. a whole university's job
+        # board) -- a regex (case-insensitive), so "communication|médiation"
+        # expresses an OR the same way CONTENT_TAG_RULES's patterns already
+        # do elsewhere in this file. None/blank means "keep everything",
+        # same as every other optional selector field. Unlike job_tags
+        # classification (which tags *for display filtering* but still
+        # stores every posting), this skips the article before it's ever
+        # persisted -- for a source whose entire listing you never want to
+        # see, not just want tagged differently.
+        if source["title_filter"] and not re.search(source["title_filter"], title, re.I):
+            continue
+
         href = link_el.get("href", "").strip()
         if not href:
             # Some pages (CPPM's news listing, e.g.) have no real per-article
@@ -671,6 +1009,12 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
         if source["deadline_selector"]:
             deadline = parse_css_date(container.select_one(source["deadline_selector"]))
 
+        city = None
+        if source["location_selector"]:
+            location_el = container.select_one(source["location_selector"])
+            if location_el:
+                city = location_el.get_text(" ", strip=True)
+
         articles.append(
             Article(
                 title=title,
@@ -682,6 +1026,257 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
                 deadline=deadline,
                 category=source["category"],
                 forced_job_tag=source["forced_job_tag"],
+                city=city,
+            )
+        )
+
+    return articles
+
+
+def scrape_email(source: "sqlite3.Row") -> list[Article]:
+    """kind="email": IMAP-fetched, not a URL fetch at all -- source["url"]
+    is just a human-readable label for this source row (schema requires a
+    non-null url), never actually requested. See email_import.py for why
+    this exists instead of scraping Indeed's site directly (Cloudflare-
+    blocked) and for the IMAP/parsing mechanics themselves; this function
+    is only the thin Article-construction wrapper, kept here (not in
+    email_import.py) so Article stays owned by one module, matching every
+    other scrape_* function's shape.
+
+    A `jk=`-bearing link's stored `link` is kept exactly as Indeed sent it
+    (tracking tokens and all) -- an earlier version rewrote it down to a
+    bare canonical `viewjob?jk=` form so plain link-based `INSERT OR
+    IGNORE` dedup would catch a repeat; that broke real clicks (Indeed's
+    bot-detection 401s a bare `/viewjob?jk=` hit, see
+    email_import.extract_indeed_jk's docstring), so dedup for these now
+    happens here instead, via an explicit `jk` lookup against already-
+    stored links (`link LIKE '%jk=<key>%'`) rather than exact-link
+    equality -- a repeat is skipped *before* ever reaching
+    persist_articles(), regardless of how different its tracking params
+    look from the first time this job was seen.
+    A sponsored "pagead" link has no stable id at all (confirmed directly:
+    the same posting's link differs completely, tracking token included,
+    across separate emails), so neither link-equality nor a `jk` lookup can
+    catch a repeat of one of those. Rather than silently creating a
+    duplicate article (the bug reported: "some indeed jobs are imported
+    multiple times") or silently guessing two same-titled postings are the
+    same job (they might not be), a pagead job whose title exactly matches
+    an already-active job/thesis-offer article is *not* returned as an
+    Article at all -- it's staged in pending_indeed_duplicates instead,
+    for the user to manually import or discard from the Jobs tab. INSERT
+    OR IGNORE on that table's own UNIQUE(link) makes this safe to
+    re-run indefinitely, same as the rest of this app's email import --
+    fetch_indeed_jobs() re-reads every message every run, so without this
+    the identical candidate would otherwise get re-staged on every single
+    scrape after being discarded once (see that table's own schema
+    comment in db.py for why `status` isn't a plain delete-on-resolve)."""
+    jobs = email_import.fetch_indeed_jobs()
+    articles = []
+    # Jobs already accepted earlier in THIS batch. Nothing is persisted until
+    # the caller runs persist_articles() (which returns the new ids the
+    # scheduler notifies about), so the DB checks below can't see a copy from
+    # the same digest -- these sets cover that gap. Without them, a job that
+    # appears several times in one digest (same jk, or the same pagead title)
+    # was created once per copy: four identical "Adaptation au changement
+    # climatique" rows in one scrape.
+    seen_jks = set()
+    seen_titles = set()
+    conn = db.get_conn()
+    try:
+        for job in jobs:
+            jk = email_import.extract_indeed_jk(job["link"])
+            title_key = job["title"].strip().lower()
+            if jk:
+                if jk in seen_jks:
+                    continue
+                already_have = conn.execute(
+                    "SELECT 1 FROM articles WHERE link LIKE ?", (f"%jk={jk}%",)
+                ).fetchone()
+                if already_have:
+                    continue
+                seen_jks.add(jk)
+            else:
+                existing = conn.execute(
+                    "SELECT articles.id FROM articles JOIN sources ON sources.id = articles.source_id "
+                    "WHERE sources.category = 'job' AND articles.archived = 0 "
+                    "AND lower(trim(articles.title)) = lower(trim(?))",
+                    (job["title"],),
+                ).fetchone()
+                if existing or title_key in seen_titles:
+                    # Same-run repeat has no DB id yet, so matched_article_id stays NULL.
+                    conn.execute(
+                        "INSERT OR IGNORE INTO pending_indeed_duplicates "
+                        "(source_id, title, link, pub_date, matched_article_id) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            source["id"], job["title"], job["link"],
+                            job["pub_date"].isoformat() if job["pub_date"] else None,
+                            existing["id"] if existing else None,
+                        ),
+                    )
+                    continue
+                seen_titles.add(title_key)
+            article = Article(
+                title=job["title"],
+                link=job["link"],
+                source_id=source["id"],
+                source_name=source["name"],
+                pub_date=job["pub_date"],
+                category=source["category"],
+                forced_job_tag=source["forced_job_tag"],
+            )
+            articles.append(article)
+        conn.commit()
+    finally:
+        conn.close()
+    return articles
+
+
+def scrape_inspirehep(source: "sqlite3.Row", limit: int = MAX_ARTICLES_PER_FETCH) -> list[Article]:
+    """kind="inspirehep": InspireHEP (the HEP-physics literature/jobs
+    database run by CERN/DESY/Fermilab/SLAC et al.) has a real, public,
+    documented JSON REST API -- source["url"] is a full API query URL
+    (e.g. `https://inspirehep.net/api/jobs?sort=mostrecent&size=25&...
+    &status=open&rank=PHD&field_of_interest=hep-ex`), not a page to
+    CSS-scrape, same "prefer a real API over scraping HTML" preference
+    this app already has for Indeed (see email_import.py). A dedicated
+    kind/function rather than a generic "json" source, matching how
+    scrape_rss hardcodes RSS/Atom's shape rather than being configurable
+    -- InspireHEP's JSON shape is this specific site's, not a general
+    contract. No selector fields used at all (article_selector etc. stay
+    NULL for this kind); `limit` still caps how many are kept, same as
+    every other kind."""
+    user_agent = source["user_agent"] or USER_AGENT
+    resp = _fetch(source["url"], user_agent)
+    if resp is None:
+        raise ScrapeError(f"Could not fetch {source['url']}")
+    try:
+        hits = resp.json()["hits"]["hits"]
+    except (ValueError, KeyError) as e:
+        raise ScrapeError(f"Unexpected InspireHEP response shape: {e}")
+
+    articles: list[Article] = []
+    for hit in hits[:limit]:
+        meta = hit.get("metadata", {})
+        title = (meta.get("position") or "").strip()
+        record_id = hit.get("id")
+        if not title or not record_id:
+            continue
+
+        pub_date = None
+        created = hit.get("created")
+        if created:
+            try:
+                pub_date = datetime.fromisoformat(created)
+            except ValueError:
+                pub_date = None
+
+        deadline = None
+        deadline_date = meta.get("deadline_date")
+        if deadline_date:
+            try:
+                deadline = datetime.strptime(deadline_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                deadline = None
+
+        articles.append(
+            Article(
+                title=title,
+                link=f"https://inspirehep.net/jobs/{record_id}",
+                source_id=source["id"],
+                source_name=source["name"],
+                pub_date=pub_date,
+                deadline=deadline,
+                excerpt=extract_excerpt(meta.get("description")),
+                category=source["category"],
+                forced_job_tag=source["forced_job_tag"],
+            )
+        )
+
+    return articles
+
+
+def scrape_doctorat_gouv(source: "sqlite3.Row", limit: int = MAX_ARTICLES_PER_FETCH) -> list[Article]:
+    """kind="doctorat_gouv": the "Plateforme nationale du doctorat"
+    (app.doctorat.gouv.fr), a government-run Angular SPA with a real,
+    public, same-origin JSON API at `/api` -- undocumented (no public
+    API docs found as of this writing), discovered by reading the
+    page's own bundled `main-*.js` for its Angular services' base URLs,
+    same "prefer a real API over scraping HTML" preference this app
+    already has for Indeed/InspireHEP. source["url"] is a full
+    `/api/propositions-these` query URL, filtered to exactly one
+    laboratory via its *exact* `laboratoire` filter value (see
+    `/api/filters/all`'s own `laboratoire` list -- matching is
+    whole-string, not fuzzy or substring). A lab not yet on that list,
+    or with zero current subjects, returns a real, correctly-empty
+    result rather than an error -- the platform is still beta and many
+    labs' subjects still only go through ADUM directly, not this
+    platform yet (12 of the 15 labs requested when this was set up
+    matched the filter list at all; only one, IJCLab, had any open
+    subjects -- see CLAUDE.md "Adding a source").
+
+    `link` is deliberately the platform's OWN stable detail-page URL
+    (`/proposition?id=<id>`, confirmed to resolve with a 200), not the
+    subject's own `urlCandidature` field -- that field is frequently an
+    ADUM URL, because this platform mirrors ADUM submissions, and this
+    app already has two ADUM sources (`ADUM: particule`, `ADUM
+    Paris-Saclay: PHENIICS`) that could independently discover the
+    exact same subject under its *original* ADUM link. Using the
+    platform's own id-keyed URL instead means this source's links can
+    never collide with an ADUM source's links for the same subject --
+    a plain, one-way improvement over relying on exact-link dedup to
+    catch it, not a workaround for a problem left otherwise unhandled.
+
+    Every date field here (`dateMiseEnLigne`, `dateLimiteCandidature`)
+    comes back as a naive ISO datetime with no UTC offset -- same
+    `.replace(tzinfo=timezone.utc)` treatment as every other naive
+    source date in this file (see scrape_inspirehep's `deadline_date`
+    just above), not because the platform's own clock is actually UTC,
+    but so every Article.pub_date/.deadline in this codebase stays
+    uniformly tz-aware regardless of its source's real precision."""
+    user_agent = source["user_agent"] or USER_AGENT
+    resp = _fetch(source["url"], user_agent)
+    if resp is None:
+        raise ScrapeError(f"Could not fetch {source['url']}")
+    try:
+        items = resp.json()["content"]
+    except (ValueError, KeyError) as e:
+        raise ScrapeError(f"Unexpected doctorat.gouv.fr response shape: {e}")
+
+    articles: list[Article] = []
+    for item in items[:limit]:
+        title = (item.get("theseTitre") or "").strip()
+        subject_id = item.get("id")
+        if not title or subject_id is None:
+            continue
+
+        pub_date = None
+        raw_date = item.get("dateMiseEnLigne") or item.get("dateCreation")
+        if raw_date:
+            try:
+                pub_date = datetime.fromisoformat(raw_date).replace(tzinfo=timezone.utc)
+            except ValueError:
+                pub_date = None
+
+        deadline = None
+        raw_deadline = item.get("dateLimiteCandidature")
+        if raw_deadline:
+            try:
+                deadline = datetime.fromisoformat(raw_deadline).replace(tzinfo=timezone.utc)
+            except ValueError:
+                deadline = None
+
+        articles.append(
+            Article(
+                title=title,
+                link=f"https://app.doctorat.gouv.fr/proposition?id={subject_id}",
+                source_id=source["id"],
+                source_name=source["name"],
+                pub_date=pub_date,
+                deadline=deadline,
+                excerpt=extract_excerpt(item.get("resume")),
+                category=source["category"],
+                forced_job_tag=source["forced_job_tag"],
+                city=(item.get("etablissementVille") or "").strip() or None,
             )
         )
 
@@ -689,9 +1284,19 @@ def scrape_css(source: "sqlite3.Row") -> list[Article]:
 
 
 def scrape_source(source: "sqlite3.Row") -> list[Article]:
+    # kind="email" is excluded on purpose -- IMAP fetches whatever's
+    # UNSEEN, there's no "N most recent items" concept to raise for a
+    # first run the way a URL fetch has.
+    limit = FIRST_SCRAPE_LIMIT if source["last_checked_at"] is None else MAX_ARTICLES_PER_FETCH
     if source["kind"] == "rss":
-        return scrape_rss(source)
-    return scrape_css(source)
+        return scrape_rss(source, limit=limit)
+    if source["kind"] == "email":
+        return scrape_email(source)
+    if source["kind"] == "inspirehep":
+        return scrape_inspirehep(source, limit=limit)
+    if source["kind"] == "doctorat_gouv":
+        return scrape_doctorat_gouv(source, limit=limit)
+    return scrape_css(source, limit=limit)
 
 
 def _record_source_health(source_id: int, status: str, error: str | None) -> None:
@@ -770,15 +1375,16 @@ def persist_articles(articles: list[Article]) -> list[int]:
             # article's defaulted date is fixed at first-seen time, not
             # recomputed on every later scrape.
             pub_date = a.pub_date or datetime.now(timezone.utc)
+            archived = 1 if job_tag in AUTO_ARCHIVE_JOB_TAGS else 0
             cur = conn.execute(
                 "INSERT OR IGNORE INTO articles "
-                "(source_id, title, link, pub_date, image_url, content_tag, deadline, job_tag, excerpt) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(source_id, title, link, pub_date, image_url, content_tag, deadline, job_tag, excerpt, remuneration, city, archived) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     a.source_id, a.title, a.link, pub_date.isoformat(),
                     a.image_url, a.content_tag,
                     a.deadline.isoformat() if a.deadline else None,
-                    job_tag, a.excerpt,
+                    job_tag, a.excerpt, a.remuneration, a.city, archived,
                 ),
             )
             if cur.rowcount:
@@ -1009,6 +1615,7 @@ def _row_to_article(row) -> Article:
         content_tag=row["content_tag"] if "content_tag" in row.keys() else None,
         deadline=deadline,
         excerpt=row["excerpt"] if "excerpt" in row.keys() else None,
+        remuneration=row["remuneration"] if "remuneration" in row.keys() else None,
     )
     article.id = row["id"]
     return article
@@ -1018,6 +1625,8 @@ def get_articles(
     only_notified: bool | None = None,
     ids: list[int] | None = None,
     include_archived: bool = False,
+    category: str | None = None,
+    exclude_category: str | None = None,
 ) -> list[Article]:
     """Read articles back out of the DB, newest first.
 
@@ -1027,7 +1636,12 @@ def get_articles(
     names). include_archived mirrors web.py's list_articles() -- archived
     articles are excluded by default from both, since an archived job
     listing showing up in a digest download or the aggregate RSS feed
-    would defeat the point of archiving it."""
+    would defeat the point of archiving it. category/exclude_category
+    mirror list_articles()' own same-named params -- added so the RSS feed
+    can be split in two (Feed's news vs Jobs' listings, see
+    download_rss_feed/download_jobs_rss_feed in web.py) instead of one
+    feed mixing both, the same category split every other view in this app
+    already has."""
     conn = db.get_conn()
     try:
         query = (
@@ -1045,6 +1659,12 @@ def get_articles(
             params.extend(ids)
         if not include_archived:
             clauses.append("articles.archived = 0")
+        if category:
+            clauses.append("sources.category = ?")
+            params.append(category)
+        if exclude_category:
+            clauses.append("sources.category != ?")
+            params.append(exclude_category)
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY articles.pub_date DESC"

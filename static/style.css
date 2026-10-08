@@ -68,7 +68,7 @@ button.primary:hover { background: #4757e0; border-color: #4757e0; }
 button.danger { color: #ff8a8a; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-input[type="text"], input[type="email"], input[type="number"], select {
+input[type="text"], input[type="email"], input[type="number"], input[type="search"], select {
   background: #1e1f24;
   border: 1px solid #2f3037;
   color: #e8e8ea;
@@ -77,6 +77,15 @@ input[type="text"], input[type="email"], input[type="number"], select {
   border-radius: 8px;
 }
 input:focus, select:focus { outline: none; border-color: #6069d6; }
+.search-input { width: 200px; }
+#feed-unread-toggle.active { background: #6069d6; border-color: #6069d6; color: #fff; }
+#job-hide-expired-toggle.active { background: #6069d6; border-color: #6069d6; color: #fff; }
+#job-show-hidden-toggle.active { background: #6069d6; border-color: #6069d6; color: #fff; }
+/* Red, requested directly -- distinct from every other toggle's blue
+   "active" state on purpose, since this one surfaces offers that were
+   deliberately put away for good (and whose saved text is already gone,
+   unlike Hide) rather than a lighter, reversible declutter. */
+#job-show-archived-toggle.active { background: #d65c5c; border-color: #d65c5c; color: #fff; }
 label { font-size: 12.5px; color: #b7bac1; display: block; margin-bottom: 4px; }
 .field { margin-bottom: 12px; }
 
@@ -118,12 +127,14 @@ label { font-size: 12.5px; color: #b7bac1; display: block; margin-bottom: 4px; }
 #feed-days[data-size="small"] .card-body h3 {
   font-size: 12.5px; -webkit-line-clamp: 2; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden;
 }
+#feed-days[data-size="small"] .card-excerpt { display: none; }
 #feed-days[data-size="small"] .card-meta { font-size: 10.5px; gap: 5px; }
 #feed-days[data-size="small"] .tag, #feed-days[data-size="small"] .content-tag { font-size: 10px; padding: 1px 7px; }
 
 #feed-days[data-size="large"] .grid { grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 24px; }
 #feed-days[data-size="large"] .card-body { padding: 20px 22px 22px; gap: 14px; }
 #feed-days[data-size="large"] .card-body h3 { font-size: 19px; }
+#feed-days[data-size="large"] .card-excerpt { font-size: 14px; -webkit-line-clamp: 4; }
 #feed-days[data-size="large"] .card-meta { font-size: 13px; }
 
 /* Filters menu: collapsible wrapper around the Feed tab's source/topic chip
@@ -191,11 +202,28 @@ label { font-size: 12.5px; color: #b7bac1; display: block; margin-bottom: 4px; }
 }
 .card-image { width: 100%; aspect-ratio: 16/9; background: #26272c; overflow: hidden; }
 .card-image img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Letter-avatar fallback (no article image, no source logo, or either one
+   failed to load) -- see cardImageFallback() in app.js. Same hue a
+   source's own tag chip uses, via --hue, so it still reads as "this
+   source" rather than a generic blank tile. */
+.card-image--placeholder {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 42px; font-weight: 700; color: hsl(var(--hue), 55%, 75%);
+  background: hsl(var(--hue), 30%, 18%);
+}
 .card-body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
 .card-body h3 { margin: 0; font-size: 15px; line-height: 1.4; font-weight: 600; color: #f2f2f4; }
 .card-body h3 a { color: inherit; text-decoration: none; }
 .card-body h3 a:hover { text-decoration: underline; }
+.card-excerpt {
+  margin: 0; font-size: 13px; line-height: 1.5; color: #b0b3ba;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+}
 .card-meta { margin-top: auto; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: #8a8d94; }
+.new-badge {
+  background: #2c7a4b; color: #d8f5e3; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px;
+}
 .tag {
   background: hsla(var(--hue), 70%, 55%, 0.18); color: hsl(var(--hue), 85%, 78%); font-weight: 600;
   font-size: 11px; padding: 2px 9px; border-radius: 999px; white-space: nowrap;
@@ -218,6 +246,68 @@ label { font-size: 12.5px; color: #b7bac1; display: block; margin-bottom: 4px; }
   font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; white-space: nowrap;
 }
 .deadline-edit-btn:hover { border-color: #6069d6; color: #9aa5ff; }
+.remuneration-badge {
+  font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap;
+  background: rgba(94,199,132,0.16); color: #5ec784;
+}
+.remuneration-edit-btn {
+  appearance: none; border: 1px dashed #3f4048; background: none; color: #8a8d94;
+  font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+}
+.remuneration-edit-btn:hover { border-color: #5ec784; color: #5ec784; }
+.city-badge {
+  font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap;
+  background: rgba(154,165,255,0.16); color: #9aa5ff;
+}
+.city-edit-btn {
+  appearance: none; border: 1px dashed #3f4048; background: none; color: #8a8d94;
+  font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+}
+.city-edit-btn:hover { border-color: #9aa5ff; color: #9aa5ff; }
+.link-edit-btn {
+  appearance: none; border: 1px dashed #3f4048; background: none; color: #8a8d94;
+  font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+}
+.link-edit-btn:hover { border-color: #6069d6; color: #9aa5ff; }
+
+.stats-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+.stats-table th, .stats-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #2a2b30; }
+.stats-table th { color: #8a8d94; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+.stats-table tbody tr:hover { background: #23242a; }
+
+/* Data Analysis page (loadAnalysis/renderStatChart) -- real full-width
+   SVG bar charts (viewBox + width:100%, so the chart always fills its
+   container rather than being boxed into a small fixed tile), with
+   gridlines/axis labels and an optional overlaid fitted curve (Gaussian
+   for pay histograms, quadratic trend for time series). Still no chart
+   library -- plain inline SVG, same "no new dependency" convention as
+   every other chart on this page. */
+.chart-section { margin-bottom: 28px; }
+.chart-section:last-child { margin-bottom: 0; }
+.chart-section h4 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.stat-chart { display: block; width: 100%; height: auto; }
+.chart-grid { stroke: #2a2b30; stroke-width: 1; }
+.chart-axis { stroke: #3f4048; stroke-width: 1.5; }
+.chart-ytick { font-size: 10.5px; fill: #8a8d94; }
+.chart-xtick { font-size: 10px; fill: #8a8d94; }
+.chart-curve { fill: none; stroke: #fff; stroke-width: 2; stroke-opacity: 0.85; }
+.chart-stats { margin: 8px 0 0; font-size: 12px; color: #b7bac1; }
+.chart-stats strong { color: #e8e8ea; font-weight: 600; }
+#analysis-tag-distribution, #analysis-source-volume { display: flex; flex-direction: column; }
+
+/* Possible-duplicate Indeed import review (openPendingDuplicatesModal) --
+   a side-by-side comparison card per pair (new import vs the existing
+   matched article), plus a decide-now action row. */
+.dup-list { display: flex; flex-direction: column; gap: 12px; }
+.dup-pair {
+  display: grid; grid-template-columns: 1fr 1fr auto; gap: 14px; align-items: start;
+  background: #23242a; border: 1px solid #2a2b30; border-radius: 8px; padding: 12px 14px;
+}
+.dup-pair__label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; color: #8a8d94; margin-bottom: 4px; }
+.dup-pair__title { font-size: 13px; margin-bottom: 4px; }
+.dup-pair__actions { display: flex; flex-direction: column; gap: 6px; }
+.dup-pair__actions button { white-space: nowrap; font-size: 12px; }
+
 .archive-btn {
   appearance: none; border: 1px dashed #3f4048; background: none; color: #8a8d94;
   font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; white-space: nowrap;
@@ -229,6 +319,15 @@ label { font-size: 12.5px; color: #b7bac1; display: block; margin-bottom: 4px; }
   font-size: 15px; color: #f2c94c; cursor: pointer; padding: 0;
 }
 .fav-btn:hover { background: rgba(20,20,24,0.9); }
+.job-select {
+  position: absolute; top: 12px; left: 12px; z-index: 2;
+  width: 20px; height: 20px; cursor: pointer; accent-color: #6069d6;
+}
+.card[data-select-id], .card[data-embed-url] { cursor: pointer; }
+.card:has(.job-select:checked) { border-color: #6069d6; background: #23242e; }
+.fav-btn:disabled, .deadline-edit-btn:disabled, .archive-btn:disabled {
+  opacity: 0.35; cursor: default; pointer-events: none;
+}
 
 .empty-state { padding: 60px 28px; text-align: center; color: #6b6e75; font-size: 14px; }
 
@@ -247,6 +346,17 @@ label { font-size: 12.5px; color: #b7bac1; display: block; margin-bottom: 4px; }
 .latest-article a { color: #9aa5ff; text-decoration: none; }
 .latest-article a:hover { text-decoration: underline; }
 .group-input { width: 130px; font-size: 12px; padding: 4px 8px; }
+.job-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.job-tag button.job-tag-remove { appearance: none; border: none; background: none; color: inherit; opacity: 0.6; padding: 0 0 0 4px; cursor: pointer; font-size: 10px; }
+.job-tag button.job-tag-remove:hover { opacity: 1; }
+.job-tag--none { opacity: 0.6; }
+.job-tag-add { font-size: 11px; padding: 1px 4px; border-radius: 999px; background: none; border: 1px dashed #3f4048; color: #8a8d94; cursor: pointer; }
+/* Subject topics on a job -- amber, so they never read as job tags (blue). */
+.topics { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.topic-tag { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: rgba(214,150,40,0.16); color: #c98a10; white-space: nowrap; }
+.topic-tag button.topic-remove { appearance: none; border: none; background: none; color: inherit; opacity: 0.6; padding: 0; cursor: pointer; font-size: 10px; }
+.topic-tag button.topic-remove:hover { opacity: 1; }
+.topic-add { font-size: 11px; width: 92px; padding: 1px 6px; border-radius: 999px; border: 1px dashed #3f4048; background: none; color: inherit; }
 .job-tag-move { display: flex; flex-direction: column; gap: 2px; }
 .move-job-tag-btn { padding: 0 6px; font-size: 10px; line-height: 1.6; }
 .move-job-tag-btn:disabled { opacity: 0.25; cursor: default; }
@@ -256,10 +366,17 @@ label { font-size: 12.5px; color: #b7bac1; display: block; margin-bottom: 4px; }
   background: #1e1f24; border: 1px solid #2a2b30; border-radius: 10px; padding: 18px; max-width: 520px;
 }
 .card-form h3 { margin-top: 0; }
+/* Data Analysis reuses .card-form's background/border/padding for each
+   chart section, but its charts need to fill the page the way a small
+   Settings-style form never does -- the shared 520px cap left every
+   graph "half width" regardless of main's own 1400px cap. Scoped to this
+   one view rather than removing max-width from .card-form itself, which
+   every other (genuinely narrow) form using that class still wants. */
+#view-analysis .card-form { max-width: none; }
 .inline-edit-form { margin: -4px 0 12px; }
 .hint { font-size: 12px; color: #6b6e75; margin-top: 4px; }
+.link-btn { appearance: none; border: none; background: none; padding: 0; font: inherit; color: #6069d6; text-decoration: underline; cursor: pointer; }
 .error-text { color: #ff8a8a; font-size: 12.5px; margin-top: 6px; }
-.success-text { color: #7fd88f; font-size: 12.5px; margin-top: 6px; }
 
 /* Folders */
 .folder-layout { display: flex; gap: 20px; align-items: flex-start; }
@@ -288,6 +405,73 @@ select.folder-picker { margin-top: 8px; }
 .picker-status strong { color: #9aa5ff; }
 .picker-frame-wrap { border: 1px solid #2a2b30; border-radius: 8px; overflow: hidden; background: #fff; }
 .picker-frame-wrap iframe { width: 100%; height: 60vh; border: none; display: block; }
+
+/* Feed's "open embedded" article viewer -- see openArticleViewer in app.js. */
+.article-viewer-box { max-width: 1000px; width: 95vw; }
+.article-viewer-frame-wrap { border: 1px solid #2a2b30; border-radius: 8px; overflow: hidden; background: #fff; }
+.article-viewer-frame-wrap iframe { width: 100%; height: 75vh; border: none; display: block; }
+.article-viewer-head-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.article-viewer-fav {
+  position: static; width: auto; height: auto; background: none;
+  font-size: 19px; color: #f2c94c; padding: 0;
+}
+.article-viewer-actions {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 10px; margin-bottom: 10px;
+}
+.article-remind-later-btn {
+  appearance: none; border: 1px solid #3f4048; background: none; color: #b7bac1;
+  font-size: 12.5px; padding: 6px 12px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+}
+.article-remind-later-btn:hover { border-color: #f2c94c; color: #f2c94c; }
+
+/* Saved job-offer page text (see save_article_text/openSavedTextViewer) --
+   plain-text snapshot, not the live embedded iframe, so this is a <pre>
+   block instead of article-viewer-frame-wrap's iframe container. */
+.saved-text-body {
+  max-height: 70vh; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  background: #1e1f24; border: 1px solid #2a2b30; border-radius: 8px;
+  padding: 14px 16px; font-size: 13px; line-height: 1.55; color: #d7d8dc;
+}
+
+/* "Viewed"/snoozed Feed articles read as de-emphasized, not hidden --
+   feedArticleStatus() in app.js decides when this applies. */
+.card--viewed { opacity: 0.55; }
+.card--viewed:hover { opacity: 0.85; }
+
+/* A hidden job, shown only via the Jobs tab's "Show hidden" toggle -- a
+   dashed outline (not just dimmed, to read as distinct from .card--viewed's
+   "already looked at" meaning) so it's clear this card is in a reversible,
+   normally-excluded state. */
+.card--hidden { opacity: 0.6; border-style: dashed; }
+.card--hidden:hover { opacity: 0.9; }
+/* Red, matching #job-show-archived-toggle -- an archived card only ever
+   renders at all when that toggle is on, so the same color ties the
+   toggle to what it reveals. */
+.card--archived { opacity: 0.7; border-color: #d65c5c; }
+.card--archived:hover { opacity: 0.95; }
+.unarchive-btn {
+  appearance: none; border: 1px dashed #3f4048; background: none; color: #8a8d94;
+  font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+}
+.unarchive-btn:hover { border-color: #d65c5c; color: #d65c5c; }
+.unhide-btn, .hide-btn {
+  appearance: none; border: 1px dashed #3f4048; background: none; color: #8a8d94;
+  font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+}
+.unhide-btn:hover, .hide-btn:hover { border-color: #6069d6; color: #9aa5ff; }
+
+/* Right-click quick-action menu on a Feed card -- see the contextmenu
+   handler in app.js. position:fixed at the cursor's viewport coords. */
+.card-context-menu {
+  position: fixed; z-index: 100; background: #1e1f24; border: 1px solid #2a2b30;
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); padding: 4px; min-width: 190px;
+}
+.card-context-menu button {
+  display: block; width: 100%; text-align: left; appearance: none; border: none; background: none;
+  color: #e8e8ea; font-size: 13px; padding: 8px 10px; border-radius: 5px; cursor: pointer;
+}
+.card-context-menu button:hover { background: #2f3037; }
 
 /* Jobs: deadline calendar view -- a real Mon-Sun month grid, same shape as
    any calendar app. Cells hold up to 3 small source-hued pills; a "+N more"
@@ -328,10 +512,24 @@ select.folder-picker { margin-top: 8px; }
   .card, .source-row, .card-form { background: #ffffff; border-color: #e4e4e8; }
   .card-image { background: #eceef1; }
   .card-body h3 { color: #1a1a1e; }
+  .card-excerpt { color: #5a5d64; }
   .cal-grid { background: #e4e4e8; border-color: #e4e4e8; }
   .cal__weekday { background: #ffffff; color: #6b6e75; }
   .cal__cell { background: #f4f4f6; }
   .cal__cell:hover { background: #eef0f3; }
   .cal__daynum { color: #4a4d55; }
   .modal__box { background: #ffffff; border-color: #e4e4e8; }
+  .card-context-menu { background: #ffffff; border-color: #e4e4e8; }
+  .card-context-menu button { color: #1a1a1e; }
+  .card-context-menu button:hover { background: #eef0f3; }
+  .stats-table th, .stats-table td { border-color: #e4e4e8; }
+  .stats-table tbody tr:hover { background: #f4f4f6; }
+  .saved-text-body { background: #f4f4f6; border-color: #e4e4e8; color: #1a1a1e; }
+  .dup-pair { background: #f4f4f6; border-color: #e4e4e8; }
+  .chart-grid { stroke: #e4e4e8; }
+  .chart-axis { stroke: #c4c6cc; }
+  .chart-ytick, .chart-xtick { fill: #6b6e75; }
+  .chart-curve { stroke: #1a1a1e; }
+  .chart-stats { color: #5a5d64; }
+  .chart-stats strong { color: #1a1a1e; }
 }
