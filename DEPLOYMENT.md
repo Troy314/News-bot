@@ -234,6 +234,24 @@ is optional cleanup, not urgent:
       tree (shown as `D` in `git status`) — harmless, just noise; delete
       or commit its removal whenever convenient.
 
+## Deploying an update (over Tailscale)
+
+The server copy is **not a git checkout** — sync the working tree, then rebuild:
+
+```bash
+cd ~/Code/News_bot
+rsync -av --exclude='.git/' --exclude='*.db*' --exclude='bin/' --exclude='lib/' \
+  --exclude='lib64' --exclude='include/' --exclude='pyvenv.cfg' --exclude='__pycache__/' \
+  --exclude='.claude/' --exclude='.env' --exclude='desktop/' --exclude='troy314@*' \
+  ./ myserver:~/docker/stacks/news-bot/app/
+ssh myserver 'cd ~/docker/stacks/news-bot && docker compose up -d --build && docker compose logs --tail 15 news_bot'
+```
+
+Add `-n` to the rsync first for a dry run. `data/` (the DB) is outside `app/`
+and never touched. Verify by SSH-tunnelling `127.0.0.1:8001`, or compare
+`md5sum` of local vs `docker exec news_bot md5sum /app/...`. The public site
+sits behind Cloudflare Access, so it can't be curl-tested unauthenticated.
+
 ## Key facts / reference
 
 | What | Value |

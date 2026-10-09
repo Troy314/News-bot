@@ -3018,6 +3018,26 @@ rather than at module level — both modules fully load before either one's
 function body actually needs the other. If you add another cross-reference
 between them, use the same pattern, not a top-level import.
 
+## Static asset caching and the hidden-tags notice
+
+- `GET /` (`web.py`'s `index()`) rewrites `style.css`/`app.js` references to
+  `?v=<file mtime>` and sends `Cache-Control: no-cache` for the page and every
+  `/static/*` file (`_NoCacheStatic`). Before this, no cache headers existed,
+  so browsers (heuristic caching on `Last-Modified`) and Cloudflare (caches
+  `.js`/`.css` by default) kept serving a stale `app.js` after a deploy.
+  A deploy that "changes nothing" is a stale-cache suspect first: check the
+  Network tab for `app.js?v=...`.
+- Jobs' hidden-tags set (`newsbot-hidden-job-tags`) is per-browser
+  `localStorage`, so a normal window can diverge from a private one. A stale
+  PhD-hidden entry made offers vanish the moment PhD was added. The Filters
+  panel now prints `Currently hidden tags: ...` (`#job-hidden-tags-note`,
+  red when PhD is in it); "reset to default" clears the saved set.
+- Hidden-tag filtering (`applyDayFilter`, "exclude" mode) hides a card only
+  when *every* tag on it is hidden; `retag_jobs()` archives only when every
+  tag is in `AUTO_ARCHIVE_JOB_TAGS`.
+- `.card-meta` badges/buttons all share `height: 22px` (end of `style.css`);
+  a new badge class needs adding to that selector list.
+
 ## Running it
 
 `python main.py` — the only correct entrypoint (see Architecture above).

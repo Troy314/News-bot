@@ -1603,9 +1603,27 @@ def debug_info():
 # Static frontend
 # --------------------------------------------------------------------------
 
+# No cache-busting used to exist, so browsers (and Cloudflare, which caches
+# .js/.css by default) kept serving a stale app.js/style.css after a deploy.
+# index.html now references each asset with its mtime as ?v=, and everything
+# is sent no-cache so a changed file is always revalidated.
+_NO_CACHE = {"Cache-Control": "no-cache"}
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for name in ("style.css", "app.js"):
+        v = int((STATIC_DIR / name).stat().st_mtime)
+        html = html.replace(f'/static/{name}"', f'/static/{name}?v={v}"')
+    return HTMLResponse(html, headers=_NO_CACHE)
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class _NoCacheStatic(StaticFiles):
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/static", _NoCacheStatic(directory=STATIC_DIR), name="static")

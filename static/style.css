@@ -539,7 +539,8 @@ select.folder-picker { margin-top: 8px; }
 .card-meta .tag, .card-meta .content-tag, .card-meta .job-tag, .card-meta .deadline-badge,
 .card-meta .remuneration-badge, .card-meta .city-badge, .card-meta .topic-tag,
 .card-meta .deadline-edit-btn, .card-meta .remuneration-edit-btn, .card-meta .city-edit-btn,
-.card-meta .archive-btn, .card-meta .job-tag-add, .card-meta .topic-add {
+.card-meta .archive-btn, .card-meta .job-tag-add, .card-meta .topic-add, .card-meta .new-badge, .card-meta .link-edit-btn, .card-meta .hide-btn, .card-meta .save-text-btn, .card-meta .view-text-btn,
+.card-meta > span:not([class]) {
   box-sizing: border-box; height: 22px; display: inline-flex; align-items: center;
   font-size: 11px; line-height: 1; padding-top: 0; padding-bottom: 0;
 }

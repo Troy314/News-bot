@@ -937,6 +937,15 @@ let jobHideExpired = loadJobHideExpired();
 
 function applyJobFilter() {
   saveHiddenJobTags();
+  // Spell out what is currently hidden: a stale per-browser set (e.g. PhD
+  // hidden by an old click) used to make tagged offers vanish with no hint.
+  const note = document.getElementById("job-hidden-tags-note");
+  if (note) {
+    note.textContent = activeJobTags.size
+      ? `Currently hidden tags: ${[...activeJobTags].join(", ")}.`
+      : "No tags are hidden.";
+    note.style.color = activeJobTags.has("PhD") ? "#ff9b9b" : "";
+  }
   localStorage.setItem(JOB_HIDE_EXPIRED_KEY, jobHideExpired ? "1" : "0");
   applyDayFilter("job-days", activeJobSources, activeJobTags, "job-no-match", "jobTags", "exclude", jobSearchTerm, false, jobHideExpired);
   renderJobCalendar();
