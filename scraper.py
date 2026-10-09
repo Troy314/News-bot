@@ -230,7 +230,9 @@ def retag_jobs() -> int:
                 manual = [new_tag if t == r["job_tag"] else t for t in manual]
                 manual = list(dict.fromkeys(t for t in manual if t))
             updates.append((new_tag, json.dumps(manual) if manual is not None else None,
-                             new_tag in AUTO_ARCHIVE_JOB_TAGS, r["id"]))
+                             # Only archive when every tag on the row is low-signal --
+                             # a PhD that also carries a hand-added Post-Doc must stay.
+                             all(t in AUTO_ARCHIVE_JOB_TAGS for t in (manual or [new_tag])), r["id"]))
         # archived only ever flips 0 -> 1 here (MAX keeps a 1 from an earlier,
         # unrelated archive decision), never back to 0 -- see AUTO_ARCHIVE_JOB_TAGS.
         conn.executemany(

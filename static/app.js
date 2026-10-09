@@ -583,8 +583,12 @@ function applyDayFilter(
         const cardTags = tagKey === "jobTags"
           ? cardTagList(card)
           : [card.dataset[tagKey]];
-        const hit = cardTags.some((t) => activeTagsSet.has(t));
-        tagOk = tagMode === "exclude" ? !hit : (activeTagsSet.size === 0 || hit);
+        // "exclude" (Jobs' hidden-tags set): hide a card only when *every* one
+        // of its tags is hidden -- a PhD offer that also carries Post-Doc or
+        // Fellowship must not vanish just because one of its tags is hidden.
+        tagOk = tagMode === "exclude"
+          ? !cardTags.every((t) => activeTagsSet.has(t))
+          : (activeTagsSet.size === 0 || cardTags.some((t) => activeTagsSet.has(t)));
       }
       const searchOk = !searchTerm || card.querySelector("h3").textContent.toLowerCase().includes(searchTerm);
       const unreadOk = !unreadOnly || !card.classList.contains("card--viewed");

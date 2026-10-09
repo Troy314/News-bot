@@ -478,9 +478,9 @@ select.folder-picker { margin-top: 8px; }
    or clicking the day number opens the modal below with the full list. */
 .cal-nav { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 .cal-nav__label { font-size: 15px; font-weight: 600; min-width: 160px; text-align: center; }
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: #2a2b30; border: 1px solid #2a2b30; border-radius: 8px; overflow: hidden; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; background: #2a2b30; border: 1px solid #2a2b30; border-radius: 8px; overflow: hidden; }
 .cal__weekday { background: #1c1d21; color: #6b6e75; font-size: 11px; font-weight: 600; text-transform: uppercase; padding: 6px 8px; text-align: center; }
-.cal__cell { background: #1e1f24; min-height: 90px; padding: 6px; display: flex; flex-direction: column; gap: 4px; cursor: pointer; }
+.cal__cell { background: #1e1f24; min-height: 90px; min-width: 0; overflow: hidden; padding: 6px; display: flex; flex-direction: column; gap: 4px; cursor: pointer; }
 .cal__cell:hover { background: #232429; }
 .cal__cell--out { opacity: 0.4; }
 .cal__cell--today .cal__daynum { color: #9aa5ff; font-weight: 700; }
@@ -533,3 +533,14 @@ select.folder-picker { margin-top: 8px; }
   .chart-stats { color: #5a5d64; }
   .chart-stats strong { color: #1a1a1e; }
 }
+
+/* Card meta badges and their "+ add" buttons share one height so a row of
+   them lines up (Favorites showed mixed sizes). */
+.card-meta .tag, .card-meta .content-tag, .card-meta .job-tag, .card-meta .deadline-badge,
+.card-meta .remuneration-badge, .card-meta .city-badge, .card-meta .topic-tag,
+.card-meta .deadline-edit-btn, .card-meta .remuneration-edit-btn, .card-meta .city-edit-btn,
+.card-meta .archive-btn, .card-meta .job-tag-add, .card-meta .topic-add {
+  box-sizing: border-box; height: 22px; display: inline-flex; align-items: center;
+  font-size: 11px; line-height: 1; padding-top: 0; padding-bottom: 0;
+}
+.card-meta .job-tag-add, .card-meta .topic-add { padding-left: 8px; padding-right: 8px; }
