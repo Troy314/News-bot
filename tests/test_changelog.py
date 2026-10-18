@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from changelog import parse_changelog  # noqa: E402
 
 CHANGELOG = Path(__file__).resolve().parents[1] / "CHANGELOG.md"
-CURRENT = "1.3"  # update with each release (CHANGELOG.md's top version)
+CURRENT = "2.0"  # update with each release (CHANGELOG.md's top version)
 
 
 class ChangelogTests(unittest.TestCase):

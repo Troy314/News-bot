@@ -1,0 +1,161 @@
+/* "Graphite" theme (Claude Design, direction 1a + 1d phone), the look since 2.0. `html:root` keeps the specificity the
+   rules had as beta, so they win over style.css (incl. its light-scheme block). Always dark, whatever the OS scheme. */
+html:root {
+  --b-bg: #131416; --b-sf: #1a1b1e; --b-sf2: #222328; --b-bar: #16171a; --b-bd: #2a2b30;
+  --b-tx: #ececee; --b-tx2: #c9cbd1; --b-mu: #9a9da6; --b-ac: #a5b0ff; --b-act: #14151f; --b-r: 10px;
+  color-scheme: dark;
+}
+html:root body { background: var(--b-bg); color: var(--b-tx); font-size: 13px; line-height: 1.45; }
+html:root main { padding: 20px 24px 28px; }
+
+/* top bar: flat tabs with an accent underline */
+html:root header.topbar { background: var(--b-bar); border-bottom-color: var(--b-bd); height: 48px; padding: 0 24px; gap: 4px; }
+html:root header.topbar h1 { font-size: 14px; letter-spacing: -0.01em; padding: 0; margin-right: 14px; }
+html:root .tab-btn { height: 48px; padding: 0 12px; font-size: 13px; color: var(--b-mu); border-radius: 0; background: none; border: 0; border-bottom: 2px solid transparent; }
+html:root .tab-btn:hover { color: var(--b-tx); }
+html:root .tab-btn.active { color: var(--b-ac); border-bottom-color: var(--b-ac); }
+html:root .topbar__version { color: var(--b-mu); }
+
+/* controls */
+html:root button, html:root .btn { background: var(--b-sf2); border: 1px solid var(--b-bd); color: var(--b-tx); font-size: 12.5px; padding: 6px 12px; border-radius: 8px; }
+html:root button:hover, html:root .btn:hover { border-color: var(--b-mu); }
+html:root button.primary, html:root #run-now-btn, html:root #job-run-now-btn,
+html:root #add-source-btn { background: var(--b-ac); border-color: var(--b-ac); color: var(--b-act); font-weight: 600; }
+html:root button.danger { color: #e07a7a; }
+html:root input, html:root select, html:root textarea { background: var(--b-bg); border: 1px solid var(--b-bd); color: var(--b-tx); font-size: 12.5px; padding: 6px 10px; border-radius: 8px; }
+html:root input:focus, html:root select:focus { border-color: var(--b-ac); }
+html:root #feed-unread-toggle.active, html:root #job-hide-expired-toggle.active,
+html:root #job-show-hidden-toggle.active { background: var(--b-ac); border-color: var(--b-ac); color: var(--b-act); }
+html:root .view-toggle { background: var(--b-bg); border-color: var(--b-bd); border-radius: 8px; padding: 2px; gap: 2px; }
+html:root .view-toggle-btn { border: 0; background: none; color: var(--b-mu); font-size: 12px; padding: 3px 10px; border-radius: 6px; }
+html:root .view-toggle-btn.active { background: var(--b-sf2); color: var(--b-tx); }
+html:root label { color: var(--b-mu); }
+
+/* chips: neutral, one dot for the source colour */
+html:root .chip, html:root .chip[data-hue]:not(.chip-all) { background: transparent; color: var(--b-mu); border: 1px solid var(--b-bd); font-size: 12px; padding: 4px 11px; }
+html:root .chip[data-hue]:not(.chip-all)::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--hue), 65%, 70%); margin-right: 6px; }
+html:root .chip.active, html:root .chip[data-hue]:not(.chip-all).active, html:root .chip-all.active { background: var(--b-sf2); color: var(--b-tx); border-color: var(--b-mu); }
+html:root .chip-group-label { color: var(--b-mu); }
+html:root .filter-menu summary { color: var(--b-mu); }
+
+/* day groups: a title with a hairline, no left rule */
+html:root .day-group { border-left: 0; padding-left: 0; margin-bottom: 20px; }
+html:root .day-group summary { padding: 0 0 8px; gap: 8px; }
+html:root .day-group summary::after { content: ""; flex: 1; height: 1px; background: var(--b-bd); }
+html:root .day-group-label { color: var(--b-tx); font-size: 12.5px; }
+html:root .day-group-count { color: var(--b-mu); }
+html:root .day-group summary:hover .day-group-label { color: var(--b-ac); }
+
+/* cards: compact tile, source dot + plain meta text instead of badges */
+html:root .grid { grid-template-columns: repeat(auto-fill, minmax(min(230px, 100%), 1fr)); gap: 12px; }
+html:root .card { background: var(--b-sf); border: 1px solid var(--b-bd); border-radius: var(--b-r); }
+html:root .card-image { aspect-ratio: auto; height: 84px; background: repeating-linear-gradient(135deg, var(--b-sf2) 0 8px, var(--b-sf) 8px 16px); }
+html:root .card-image--placeholder { font-size: 28px; color: hsl(var(--hue), 65%, 70%); background: repeating-linear-gradient(135deg, var(--b-sf2) 0 8px, var(--b-sf) 8px 16px); }
+html:root .card-body { padding: 10px 12px 12px; gap: 4px; }
+html:root .card-body h2 { font-size: 13.5px; line-height: 1.35; color: var(--b-tx); }
+html:root .card-excerpt { font-size: 12.5px; line-height: 1.45; color: var(--b-mu); -webkit-line-clamp: 2; }
+html:root .card-meta { color: var(--b-mu); gap: 6px; }
+html:root .card-meta .tag, html:root .content-tag, html:root .job-tag, html:root .city-badge,
+html:root .remuneration-badge, html:root .deadline-badge, html:root .topic-tag {
+  background: transparent; padding: 0; border-radius: 0; font-weight: 400; color: var(--b-mu);
+}
+html:root .card-meta .tag { color: var(--b-tx2); }
+html:root .card-meta .tag::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--hue), 65%, 70%); margin-right: 6px; }
+html:root .deadline-badge { color: #e6c15a; }
+html:root .deadline-badge[data-passed="true"] { color: #e07a7a; }
+html:root .new-badge { background: var(--b-ac); color: var(--b-act); }
+html:root .fav-btn { color: #e6c15a; background: rgba(19, 20, 22, 0.8); border-radius: 6px; width: 28px; height: 28px; top: 6px; right: 6px; }
+html:root .card:has(.job-select:checked) { border-color: var(--b-ac); background: var(--b-sf2); }
+
+/* lists and panels */
+html:root .source-row { background: var(--b-sf); border: 0; border-bottom: 1px solid var(--b-bd); border-radius: 0; margin: 0; padding: 10px 14px; }
+html:root #view-sources .source-row:first-of-type { border-top-left-radius: var(--b-r); border-top-right-radius: var(--b-r); }
+html:root .card-form { background: var(--b-sf); border: 1px solid var(--b-bd); border-radius: var(--b-r); padding: 14px 16px; }
+html:root .empty-state, html:root .hint { color: var(--b-mu); }
+html:root .stats-table th { color: var(--b-mu); }
+html:root .stats-table th, html:root .stats-table td { border-color: var(--b-bd); }
+html:root .modal__box, html:root .card-context-menu { background: var(--b-sf2); border-color: var(--b-bd); color: var(--b-tx); }
+html:root .card-context-menu button { color: var(--b-tx); }
+html:root .dup-pair, html:root .saved-text-body { background: var(--b-sf2); border-color: var(--b-bd); color: var(--b-tx); }
+html:root .chart-grid { stroke: var(--b-bd); }
+html:root .chart-axis { stroke: #3f4048; }
+html:root .chart-ytick, html:root .chart-xtick { fill: var(--b-mu); }
+html:root .chart-curve { stroke: #fff; }
+html:root .chart-stats { color: var(--b-tx2); }
+html:root .chart-stats strong { color: var(--b-tx); }
+html:root .cal-grid { background: var(--b-bd); border-color: var(--b-bd); border-radius: var(--b-r); }
+html:root .cal__weekday { background: var(--b-bar); color: var(--b-mu); }
+html:root .cal__cell { background: var(--b-sf); }
+html:root .cal__cell:hover { background: var(--b-sf2); }
+html:root .cal__daynum { color: var(--b-mu); }
+
+/* Admin: underlined tabs */
+html:root .admin-tabs { gap: 2px; border-bottom: 1px solid var(--b-bd); margin-bottom: 16px; }
+html:root .admin-tab { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; margin-bottom: -1px; padding: 8px 14px; font-size: 13px; color: var(--b-mu); }
+html:root .admin-tab.active { background: none; color: var(--b-tx); font-weight: 600; border-bottom-color: var(--b-ac); }
+html:root .admin-panel.active { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 12px; align-items: start; }
+html:root .admin-panel .card-form { max-width: none; margin-bottom: 0 !important; }
+
+html:root .beta-banner { background: var(--b-ac); color: var(--b-act); }
+html:root .beta-banner button { background: var(--b-act); color: var(--b-ac); border-color: var(--b-act); }
+
+/* phone bottom menu: a bar above the label instead of an icon */
+@media (max-width: 640px) {
+  html:root main { padding: 14px 14px 24px; }
+  html:root header.topbar { padding: 0 14px; }
+  html:root .bottomnav { background: var(--b-bar); border-top-color: var(--b-bd); height: 56px; }
+  html:root .bottomnav__item { background: none; border: 0; gap: 6px; color: var(--b-mu); }
+  html:root .bottomnav__icon { display: none; }
+  html:root .bottomnav__item::before { content: ""; width: 18px; height: 3px; border-radius: 2px; background: transparent; }
+  html:root .bottomnav__item.active { color: var(--b-ac); }
+  html:root .bottomnav__item.active::before { background: var(--b-ac); }
+  html:root .bottomnav__sheet:not([hidden]) { background: var(--b-sf2); border: 1px solid var(--b-bd); border-radius: 12px; left: 8px; right: 8px; bottom: 62px; }
+  html:root .bottomnav__more { background: none; border-bottom-color: var(--b-bd); color: var(--b-tx); }
+  html:root .grid { grid-template-columns: 1fr; }
+}
+
+html:root #admin-settings .card-form:last-child { grid-column: 1 / -1; }
+
+/* Feed display mode "List" (also the only layout of Favorites): each article takes the full width, abstract shown in full. */
+html:root .beta-only { display: inline-block; }
+html:root #feed-days[data-size="list"] .grid, html:root #favorites-grid { grid-template-columns: 1fr; gap: 8px; }
+html:root #feed-days[data-size="list"] .card, html:root #favorites-grid .card { flex-direction: row; }
+html:root #feed-days[data-size="list"] .card, html:root #favorites-grid .card { align-items: flex-start; }
+html:root #feed-days[data-size="list"] .card-image, html:root #favorites-grid .card-image { flex: none; width: 128px; height: 84px; min-height: 0; aspect-ratio: auto; margin: 12px 0 12px 12px; border-radius: 6px; font-size: 24px; }
+html:root #feed-days[data-size="list"] .card-body, html:root #favorites-grid .card-body { padding: 12px 16px; gap: 6px; min-width: 0; }
+html:root #feed-days[data-size="list"] .card-body h2, html:root #favorites-grid .card-body h2 { font-size: 14.5px; }
+html:root #feed-days[data-size="list"] .card-excerpt, html:root #favorites-grid .card-excerpt { display: block; -webkit-line-clamp: unset; overflow: visible; font-size: 13px; color: var(--b-tx2); }
+@media (max-width: 640px) {
+  html:root #feed-days[data-size="list"] .card-image, html:root #favorites-grid .card-image { width: 84px; height: 64px; margin: 10px 0 10px 10px; }
+}
+
+/* Data Analysis rework: focus selector (PhD / Outreach / Both), KPI strip, charts in a two-column grid */
+html:root .view-toggle.beta-only { display: flex; }
+html:root .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 12px; margin-bottom: 16px; }
+html:root .kpi { background: var(--b-sf); border: 1px solid var(--b-bd); border-radius: var(--b-r); padding: 12px 16px; }
+html:root .kpi__v { font-size: 22px; font-weight: 600; color: var(--b-tx); line-height: 1.2; }
+html:root .kpi__k { font-size: 12px; color: var(--b-mu); margin-top: 2px; }
+html:root #view-analysis .toolbar { gap: 8px; }
+@media (min-width: 1000px) {
+  html:root #view-analysis { display: none; }
+  html:root #view-analysis.active { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+  html:root #view-analysis > .toolbar, html:root #view-analysis > .kpis,
+  html:root #view-analysis > .card-form:has(#analysis-pay-charts) { grid-column: 1 / -1; }
+  html:root #view-analysis > .card-form { margin-bottom: 0 !important; }
+}
+/* long explanations on the analysis page: two lines, click to read the rest */
+html:root #view-analysis .card-form > .hint { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; cursor: pointer; margin: 0 0 10px; }
+html:root #view-analysis .card-form > .hint.expanded { -webkit-line-clamp: unset; }
+html:root #view-analysis .empty-state { padding: 28px 12px; }
+
+/* Favorites: folder picker and remove button to the right of each card */
+.fav-actions { display: contents; }
+html:root #favorites-grid > div { display: flex; align-items: flex-start; gap: 10px; }
+html:root #favorites-grid > div > .card { flex: 1 1 auto; min-width: 0; }
+html:root .fav-actions { display: flex; flex-direction: column; gap: 8px; flex: none; width: 168px; }
+html:root .fav-actions select, html:root .fav-actions button { width: 100%; }
+@media (max-width: 640px) {
+  html:root #favorites-grid > div { flex-direction: column; align-items: stretch; }
+  html:root .fav-actions { flex-direction: row; width: auto; }
+  html:root .fav-actions > * { flex: 1 1 0; min-width: 0; }
+}

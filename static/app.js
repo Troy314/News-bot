@@ -2049,13 +2049,12 @@ function loadAnalysisGranularity() {
   return ["week", "month", "quarter"].includes(stored) ? stored : "month";
 }
 
-// Beta: PhD / Outreach / Both selector (Both = the two tags together). Without
-// beta the page behaves as before (no tags filter).
+// PhD / Outreach / Both selector (Both = the two tags together).
 const ANALYSIS_FOCUS_KEY = "newsbot-analysis-focus";
 const ANALYSIS_FOCUS_TAGS = { phd: "PhD", outreach: "Outreach", both: "PhD,Outreach" };
 let analysisFocus = ["phd", "outreach", "both"].includes(localStorage.getItem(ANALYSIS_FOCUS_KEY))
   ? localStorage.getItem(ANALYSIS_FOCUS_KEY) : "both";
-const analysisBeta = () => document.documentElement.dataset.beta === "on";
+const analysisBeta = () => true;
 const analysisTagsParam = () => (analysisBeta() ? `&tags=${encodeURIComponent(ANALYSIS_FOCUS_TAGS[analysisFocus])}` : "");
 
 let analysisBinSize = loadAnalysisBinSize();
@@ -3143,8 +3142,6 @@ document.getElementById("debug-refresh-btn").addEventListener("click", loadDebug
 const FEED_SIZE_KEY = "newsbot-feed-size";
 
 function applyFeedSize(size) {
-  // "list" (full-width rows with the abstract) is beta-only for now.
-  if (size === "list" && document.documentElement.dataset.beta !== "on") size = "medium";
   document.getElementById("feed-days").dataset.size = size;
   document.querySelectorAll("#size-toggle .view-toggle-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.size === size);

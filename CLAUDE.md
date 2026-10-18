@@ -690,18 +690,17 @@ without also fixing the underlying limitation.
 - **Admin tab** (`#view-admin`): sub-tabs Settings, Debug (the former top-level tabs, same element ids),
   **Bêta** (version, changelog, per-tab beta switch) and **Correctifs** (hotfix procedure, x.y.z list).
   Logic in `static/admin.js` (ES module); `static/beta.js` is a copy of `shared-ui/src/beta.js` (never edit it
-  here — change the kit). New behaviour in the live app goes behind `isBeta()` / `html[data-beta="on"]`.
-- **Beta redesign "Graphite"** (Claude Design 1a desktop + 1d phone): `static/beta.css`, every rule scoped to
-  `html[data-beta="on"]` (always dark, flat tabs, compact 84px-image cards, source dot + plain meta text instead of
-  badges, hairline day headings, underlined Admin tabs, bar-above-label bottom menu). Reachable only via Admin → Bêta.
-  Approved → drop the `html[data-beta="on"]` prefix / merge into `style.css`, bump x.y, add a CHANGELOG entry.
-  Feed has a 4th display mode **List** (`data-size="list"`, beta-only button `.beta-only`): one article per row on the full
-  width, abstract (`excerpt`) shown in full; falls back to Medium when beta is off. Only RSS sources have an excerpt.
-  **Data Analysis** (beta): a PhD / Outreach / Both selector (`#analysis-focus`, default Both, persisted) sends `tags=` to
-  `/api/jobs/stats`, `/api/jobs/pay-by-city`, `/api/jobs/analysis` (comma-separated tag names, blank = all; an offer matches if any
-  of its effective tags is requested; `tests/test_analysis_tags.py`), plus a KPI strip and a 2-column chart grid. Without beta, no `tags` param.
-  Not ported yet: Feed toolbar "More ▾" menu (digest/RSS/card size still inline), list-style Jobs rows.
-  Audit it with `--views audit/views-beta.json`.
+  here — change the kit). The next new behaviour goes behind `isBeta()` / `html[data-beta="on"]` again.
+- **Look "Graphite" (live since 2.0, Claude Design 1a desktop + 1d phone)**: `static/theme.css`, always dark (flat tabs, compact
+  84px-image cards, source dot + plain meta text instead of badges, hairline day headings, underlined Admin tabs, bar-above-label
+  bottom menu). Its selectors start with `html:root` (same specificity as the former `html[data-beta="on"]` prefix) so they
+  beat `style.css`, including its now-unused light-scheme blocks. Feed has a 4th display mode **List** (`data-size="list"`):
+  one article per row, full width, thumbnail + abstract (`excerpt`) in full — only RSS sources have an excerpt. Favorites is
+  list-only, with the folder picker/remove button right of each card (`.fav-actions`). **Data Analysis**: a PhD / Outreach / Both
+  selector (`#analysis-focus`, default Both, persisted) sends `tags=` to `/api/jobs/stats`, `/api/jobs/pay-by-city`,
+  `/api/jobs/analysis` (comma-separated tag names, blank = all; an offer matches if any of its effective tags is requested;
+  `tests/test_analysis_tags.py`), plus a KPI strip and a 2-column chart grid.
+  Not ported from the design: Feed toolbar "More ▾" menu, list-style Jobs rows.
 - **Phone (≤ 640 px)**: the top tab bar is hidden and a bottom menu (Feed, Favorites, Jobs, Sources, Plus →
   Data Analysis, Admin) takes over; it just clicks the hidden `.tab-btn`, so tab loading logic stays in `app.js`.
 - **UI audit** (`audit/`): `audit/serve-test.sh start` runs the web app only, on a throw-away COPY of
