@@ -116,15 +116,16 @@ html[data-beta="on"] .beta-banner button { background: var(--b-act); color: var(
 
 html[data-beta="on"] #admin-settings .card-form:last-child { grid-column: 1 / -1; }
 
-/* Feed display mode "List": each article takes the full width, abstract shown in full. */
+/* Feed display mode "List" (also the only layout of Favorites): each article takes the full width, abstract shown in full. */
 .beta-only { display: none; }
 html[data-beta="on"] .beta-only { display: inline-block; }
-html[data-beta="on"] #feed-days[data-size="list"] .grid { grid-template-columns: 1fr; gap: 8px; }
-html[data-beta="on"] #feed-days[data-size="list"] .card { flex-direction: row; }
-html[data-beta="on"] #feed-days[data-size="list"] .card-image { flex: none; width: 150px; height: auto; min-height: 96px; aspect-ratio: auto; }
-html[data-beta="on"] #feed-days[data-size="list"] .card-body { padding: 12px 16px; gap: 6px; min-width: 0; }
-html[data-beta="on"] #feed-days[data-size="list"] .card-body h2 { font-size: 14.5px; }
-html[data-beta="on"] #feed-days[data-size="list"] .card-excerpt { display: block; -webkit-line-clamp: unset; overflow: visible; font-size: 13px; color: var(--b-tx2); }
+html[data-beta="on"] #feed-days[data-size="list"] .grid, html[data-beta="on"] #favorites-grid { grid-template-columns: 1fr; gap: 8px; }
+html[data-beta="on"] #feed-days[data-size="list"] .card, html[data-beta="on"] #favorites-grid .card { flex-direction: row; }
+html[data-beta="on"] #feed-days[data-size="list"] .card, html[data-beta="on"] #favorites-grid .card { align-items: flex-start; }
+html[data-beta="on"] #feed-days[data-size="list"] .card-image, html[data-beta="on"] #favorites-grid .card-image { flex: none; width: 128px; height: 84px; min-height: 0; aspect-ratio: auto; margin: 12px 0 12px 12px; border-radius: 6px; font-size: 24px; }
+html[data-beta="on"] #feed-days[data-size="list"] .card-body, html[data-beta="on"] #favorites-grid .card-body { padding: 12px 16px; gap: 6px; min-width: 0; }
+html[data-beta="on"] #feed-days[data-size="list"] .card-body h2, html[data-beta="on"] #favorites-grid .card-body h2 { font-size: 14.5px; }
+html[data-beta="on"] #feed-days[data-size="list"] .card-excerpt, html[data-beta="on"] #favorites-grid .card-excerpt { display: block; -webkit-line-clamp: unset; overflow: visible; font-size: 13px; color: var(--b-tx2); }
 @media (max-width: 640px) {
-  html[data-beta="on"] #feed-days[data-size="list"] .card-image { width: 84px; min-height: 84px; }
+  html[data-beta="on"] #feed-days[data-size="list"] .card-image, html[data-beta="on"] #favorites-grid .card-image { width: 84px; height: 64px; margin: 10px 0 10px 10px; }
 }
