@@ -697,6 +697,9 @@ without also fixing the underlying limitation.
   Approved → drop the `html[data-beta="on"]` prefix / merge into `style.css`, bump x.y, add a CHANGELOG entry.
   Feed has a 4th display mode **List** (`data-size="list"`, beta-only button `.beta-only`): one article per row on the full
   width, abstract (`excerpt`) shown in full; falls back to Medium when beta is off. Only RSS sources have an excerpt.
+  **Data Analysis** (beta): a PhD / Outreach / Both selector (`#analysis-focus`, default Both, persisted) sends `tags=` to
+  `/api/jobs/stats`, `/api/jobs/pay-by-city`, `/api/jobs/analysis` (comma-separated tag names, blank = all; an offer matches if any
+  of its effective tags is requested; `tests/test_analysis_tags.py`), plus a KPI strip and a 2-column chart grid. Without beta, no `tags` param.
   Not ported yet: Feed toolbar "More ▾" menu (digest/RSS/card size still inline), list-style Jobs rows.
   Audit it with `--views audit/views-beta.json`.
 - **Phone (≤ 640 px)**: the top tab bar is hidden and a bottom menu (Feed, Favorites, Jobs, Sources, Plus →
