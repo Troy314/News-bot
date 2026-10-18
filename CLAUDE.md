@@ -691,6 +691,12 @@ without also fixing the underlying limitation.
   **Bêta** (version, changelog, per-tab beta switch) and **Correctifs** (hotfix procedure, x.y.z list).
   Logic in `static/admin.js` (ES module); `static/beta.js` is a copy of `shared-ui/src/beta.js` (never edit it
   here — change the kit). New behaviour in the live app goes behind `isBeta()` / `html[data-beta="on"]`.
+- **Beta redesign "Graphite"** (Claude Design 1a desktop + 1d phone): `static/beta.css`, every rule scoped to
+  `html[data-beta="on"]` (always dark, flat tabs, compact 84px-image cards, source dot + plain meta text instead of
+  badges, hairline day headings, underlined Admin tabs, bar-above-label bottom menu). Reachable only via Admin → Bêta.
+  Approved → drop the `html[data-beta="on"]` prefix / merge into `style.css`, bump x.y, add a CHANGELOG entry.
+  Not ported yet: Feed toolbar "More ▾" menu (digest/RSS/card size still inline), list-style Jobs rows.
+  Audit it with `--views audit/views-beta.json`.
 - **Phone (≤ 640 px)**: the top tab bar is hidden and a bottom menu (Feed, Favorites, Jobs, Sources, Plus →
   Data Analysis, Admin) takes over; it just clicks the hidden `.tab-btn`, so tab loading logic stays in `app.js`.
 - **UI audit** (`audit/`): `audit/serve-test.sh start` runs the web app only, on a throw-away COPY of

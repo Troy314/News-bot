@@ -1,0 +1,117 @@
+/* Beta redesign "Graphite" (Claude Design, direction 1a + 1d phone). Everything is scoped to html[data-beta="on"]
+   (Admin → Bêta), so the live look is untouched until approved. Always dark, whatever the OS scheme. */
+html[data-beta="on"] {
+  --b-bg: #131416; --b-sf: #1a1b1e; --b-sf2: #222328; --b-bar: #16171a; --b-bd: #2a2b30;
+  --b-tx: #ececee; --b-tx2: #c9cbd1; --b-mu: #9a9da6; --b-ac: #a5b0ff; --b-act: #14151f; --b-r: 10px;
+  color-scheme: dark;
+}
+html[data-beta="on"] body { background: var(--b-bg); color: var(--b-tx); font-size: 13px; line-height: 1.45; }
+html[data-beta="on"] main { padding: 20px 24px 28px; }
+
+/* top bar: flat tabs with an accent underline */
+html[data-beta="on"] header.topbar { background: var(--b-bar); border-bottom-color: var(--b-bd); height: 48px; padding: 0 24px; gap: 4px; }
+html[data-beta="on"] header.topbar h1 { font-size: 14px; letter-spacing: -0.01em; padding: 0; margin-right: 14px; }
+html[data-beta="on"] .tab-btn { height: 48px; padding: 0 12px; font-size: 13px; color: var(--b-mu); border-radius: 0; background: none; border: 0; border-bottom: 2px solid transparent; }
+html[data-beta="on"] .tab-btn:hover { color: var(--b-tx); }
+html[data-beta="on"] .tab-btn.active { color: var(--b-ac); border-bottom-color: var(--b-ac); }
+html[data-beta="on"] .topbar__version { color: var(--b-mu); }
+
+/* controls */
+html[data-beta="on"] button, html[data-beta="on"] .btn { background: var(--b-sf2); border: 1px solid var(--b-bd); color: var(--b-tx); font-size: 12.5px; padding: 6px 12px; border-radius: 8px; }
+html[data-beta="on"] button:hover, html[data-beta="on"] .btn:hover { border-color: var(--b-mu); }
+html[data-beta="on"] button.primary, html[data-beta="on"] #run-now-btn, html[data-beta="on"] #job-run-now-btn,
+html[data-beta="on"] #add-source-btn { background: var(--b-ac); border-color: var(--b-ac); color: var(--b-act); font-weight: 600; }
+html[data-beta="on"] button.danger { color: #e07a7a; }
+html[data-beta="on"] input, html[data-beta="on"] select, html[data-beta="on"] textarea { background: var(--b-bg); border: 1px solid var(--b-bd); color: var(--b-tx); font-size: 12.5px; padding: 6px 10px; border-radius: 8px; }
+html[data-beta="on"] input:focus, html[data-beta="on"] select:focus { border-color: var(--b-ac); }
+html[data-beta="on"] #feed-unread-toggle.active, html[data-beta="on"] #job-hide-expired-toggle.active,
+html[data-beta="on"] #job-show-hidden-toggle.active { background: var(--b-ac); border-color: var(--b-ac); color: var(--b-act); }
+html[data-beta="on"] .view-toggle { background: var(--b-bg); border-color: var(--b-bd); border-radius: 8px; padding: 2px; gap: 2px; }
+html[data-beta="on"] .view-toggle-btn { border: 0; background: none; color: var(--b-mu); font-size: 12px; padding: 3px 10px; border-radius: 6px; }
+html[data-beta="on"] .view-toggle-btn.active { background: var(--b-sf2); color: var(--b-tx); }
+html[data-beta="on"] label { color: var(--b-mu); }
+
+/* chips: neutral, one dot for the source colour */
+html[data-beta="on"] .chip, html[data-beta="on"] .chip[data-hue]:not(.chip-all) { background: transparent; color: var(--b-mu); border: 1px solid var(--b-bd); font-size: 12px; padding: 4px 11px; }
+html[data-beta="on"] .chip[data-hue]:not(.chip-all)::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--hue), 65%, 70%); margin-right: 6px; }
+html[data-beta="on"] .chip.active, html[data-beta="on"] .chip[data-hue]:not(.chip-all).active, html[data-beta="on"] .chip-all.active { background: var(--b-sf2); color: var(--b-tx); border-color: var(--b-mu); }
+html[data-beta="on"] .chip-group-label { color: var(--b-mu); }
+html[data-beta="on"] .filter-menu summary { color: var(--b-mu); }
+
+/* day groups: a title with a hairline, no left rule */
+html[data-beta="on"] .day-group { border-left: 0; padding-left: 0; margin-bottom: 20px; }
+html[data-beta="on"] .day-group summary { padding: 0 0 8px; gap: 8px; }
+html[data-beta="on"] .day-group summary::after { content: ""; flex: 1; height: 1px; background: var(--b-bd); }
+html[data-beta="on"] .day-group-label { color: var(--b-tx); font-size: 12.5px; }
+html[data-beta="on"] .day-group-count { color: var(--b-mu); }
+html[data-beta="on"] .day-group summary:hover .day-group-label { color: var(--b-ac); }
+
+/* cards: compact tile, source dot + plain meta text instead of badges */
+html[data-beta="on"] .grid { grid-template-columns: repeat(auto-fill, minmax(min(230px, 100%), 1fr)); gap: 12px; }
+html[data-beta="on"] .card { background: var(--b-sf); border: 1px solid var(--b-bd); border-radius: var(--b-r); }
+html[data-beta="on"] .card-image { aspect-ratio: auto; height: 84px; background: repeating-linear-gradient(135deg, var(--b-sf2) 0 8px, var(--b-sf) 8px 16px); }
+html[data-beta="on"] .card-image--placeholder { font-size: 28px; color: hsl(var(--hue), 65%, 70%); background: repeating-linear-gradient(135deg, var(--b-sf2) 0 8px, var(--b-sf) 8px 16px); }
+html[data-beta="on"] .card-body { padding: 10px 12px 12px; gap: 4px; }
+html[data-beta="on"] .card-body h2 { font-size: 13.5px; line-height: 1.35; color: var(--b-tx); }
+html[data-beta="on"] .card-excerpt { font-size: 12.5px; line-height: 1.45; color: var(--b-mu); -webkit-line-clamp: 2; }
+html[data-beta="on"] .card-meta { color: var(--b-mu); gap: 6px; }
+html[data-beta="on"] .card-meta .tag, html[data-beta="on"] .content-tag, html[data-beta="on"] .job-tag, html[data-beta="on"] .city-badge,
+html[data-beta="on"] .remuneration-badge, html[data-beta="on"] .deadline-badge, html[data-beta="on"] .topic-tag {
+  background: transparent; padding: 0; border-radius: 0; font-weight: 400; color: var(--b-mu);
+}
+html[data-beta="on"] .card-meta .tag { color: var(--b-tx2); }
+html[data-beta="on"] .card-meta .tag::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--hue), 65%, 70%); margin-right: 6px; }
+html[data-beta="on"] .deadline-badge { color: #e6c15a; }
+html[data-beta="on"] .deadline-badge[data-passed="true"] { color: #e07a7a; }
+html[data-beta="on"] .new-badge { background: var(--b-ac); color: var(--b-act); }
+html[data-beta="on"] .fav-btn { color: #e6c15a; background: rgba(19, 20, 22, 0.8); border-radius: 6px; width: 28px; height: 28px; top: 6px; right: 6px; }
+html[data-beta="on"] .card:has(.job-select:checked) { border-color: var(--b-ac); background: var(--b-sf2); }
+
+/* lists and panels */
+html[data-beta="on"] .source-row { background: var(--b-sf); border: 0; border-bottom: 1px solid var(--b-bd); border-radius: 0; margin: 0; padding: 10px 14px; }
+html[data-beta="on"] #view-sources .source-row:first-of-type { border-top-left-radius: var(--b-r); border-top-right-radius: var(--b-r); }
+html[data-beta="on"] .card-form { background: var(--b-sf); border: 1px solid var(--b-bd); border-radius: var(--b-r); padding: 14px 16px; }
+html[data-beta="on"] .empty-state, html[data-beta="on"] .hint { color: var(--b-mu); }
+html[data-beta="on"] .stats-table th { color: var(--b-mu); }
+html[data-beta="on"] .stats-table th, html[data-beta="on"] .stats-table td { border-color: var(--b-bd); }
+html[data-beta="on"] .modal__box, html[data-beta="on"] .card-context-menu { background: var(--b-sf2); border-color: var(--b-bd); color: var(--b-tx); }
+html[data-beta="on"] .card-context-menu button { color: var(--b-tx); }
+html[data-beta="on"] .dup-pair, html[data-beta="on"] .saved-text-body { background: var(--b-sf2); border-color: var(--b-bd); color: var(--b-tx); }
+html[data-beta="on"] .chart-grid { stroke: var(--b-bd); }
+html[data-beta="on"] .chart-axis { stroke: #3f4048; }
+html[data-beta="on"] .chart-ytick, html[data-beta="on"] .chart-xtick { fill: var(--b-mu); }
+html[data-beta="on"] .chart-curve { stroke: #fff; }
+html[data-beta="on"] .chart-stats { color: var(--b-tx2); }
+html[data-beta="on"] .chart-stats strong { color: var(--b-tx); }
+html[data-beta="on"] .cal-grid { background: var(--b-bd); border-color: var(--b-bd); border-radius: var(--b-r); }
+html[data-beta="on"] .cal__weekday { background: var(--b-bar); color: var(--b-mu); }
+html[data-beta="on"] .cal__cell { background: var(--b-sf); }
+html[data-beta="on"] .cal__cell:hover { background: var(--b-sf2); }
+html[data-beta="on"] .cal__daynum { color: var(--b-mu); }
+
+/* Admin: underlined tabs */
+html[data-beta="on"] .admin-tabs { gap: 2px; border-bottom: 1px solid var(--b-bd); margin-bottom: 16px; }
+html[data-beta="on"] .admin-tab { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; margin-bottom: -1px; padding: 8px 14px; font-size: 13px; color: var(--b-mu); }
+html[data-beta="on"] .admin-tab.active { background: none; color: var(--b-tx); font-weight: 600; border-bottom-color: var(--b-ac); }
+html[data-beta="on"] .admin-panel.active { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 12px; align-items: start; }
+html[data-beta="on"] .admin-panel .card-form { max-width: none; margin-bottom: 0 !important; }
+
+html[data-beta="on"] .beta-banner { background: var(--b-ac); color: var(--b-act); }
+html[data-beta="on"] .beta-banner button { background: var(--b-act); color: var(--b-ac); border-color: var(--b-act); }
+
+/* phone bottom menu: a bar above the label instead of an icon */
+@media (max-width: 640px) {
+  html[data-beta="on"] main { padding: 14px 14px 24px; }
+  html[data-beta="on"] header.topbar { padding: 0 14px; }
+  html[data-beta="on"] .bottomnav { background: var(--b-bar); border-top-color: var(--b-bd); height: 56px; }
+  html[data-beta="on"] .bottomnav__item { background: none; border: 0; gap: 6px; color: var(--b-mu); }
+  html[data-beta="on"] .bottomnav__icon { display: none; }
+  html[data-beta="on"] .bottomnav__item::before { content: ""; width: 18px; height: 3px; border-radius: 2px; background: transparent; }
+  html[data-beta="on"] .bottomnav__item.active { color: var(--b-ac); }
+  html[data-beta="on"] .bottomnav__item.active::before { background: var(--b-ac); }
+  html[data-beta="on"] .bottomnav__sheet:not([hidden]) { background: var(--b-sf2); border: 1px solid var(--b-bd); border-radius: 12px; left: 8px; right: 8px; bottom: 62px; }
+  html[data-beta="on"] .bottomnav__more { background: none; border-bottom-color: var(--b-bd); color: var(--b-tx); }
+  html[data-beta="on"] .grid { grid-template-columns: 1fr; }
+}
+
+html[data-beta="on"] #admin-settings .card-form:last-child { grid-column: 1 / -1; }
