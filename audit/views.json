@@ -1,0 +1,72 @@
+[
+ {
+  "name": "feed",
+  "path": "/",
+  "clicks": []
+ },
+ {
+  "name": "favorites",
+  "path": "/",
+  "clicks": [
+   "Favorites"
+  ]
+ },
+ {
+  "name": "jobs",
+  "path": "/",
+  "clicks": [
+   "Jobs"
+  ]
+ },
+ {
+  "name": "analysis",
+  "path": "/",
+  "clicks": [
+   "?Plus",
+   "Data Analysis"
+  ]
+ },
+ {
+  "name": "sources",
+  "path": "/",
+  "clicks": [
+   "Sources"
+  ]
+ },
+ {
+  "name": "settings",
+  "path": "/",
+  "clicks": [
+   "?Plus",
+   "Admin",
+   "Settings"
+  ]
+ },
+ {
+  "name": "debug",
+  "path": "/",
+  "clicks": [
+   "?Plus",
+   "Admin",
+   "Debug"
+  ]
+ },
+ {
+  "name": "beta",
+  "path": "/",
+  "clicks": [
+   "?Plus",
+   "Admin",
+   "Bêta"
+  ]
+ },
+ {
+  "name": "hotfix",
+  "path": "/",
+  "clicks": [
+   "?Plus",
+   "Admin",
+   "Correctifs"
+  ]
+ }
+]

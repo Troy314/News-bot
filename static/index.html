@@ -14,9 +14,13 @@
     <button class="tab-btn" data-view="jobs">Jobs</button>
     <button class="tab-btn" data-view="analysis">Data Analysis</button>
     <button class="tab-btn" data-view="sources">Sources</button>
-    <button class="tab-btn" data-view="settings">Settings</button>
-    <button class="tab-btn" data-view="debug">Debug</button>
+    <button class="tab-btn" data-view="admin">Admin</button>
+    <span class="topbar__version" id="app-version" title="Version"></span>
   </header>
+  <div id="beta-banner" class="beta-banner" hidden>
+    Mode bêta actif (cet onglet seulement).
+    <button id="beta-off-btn" type="button">Quitter la bêta</button>
+  </div>
 
   <main>
     <!-- FEED -->
@@ -24,7 +28,7 @@
       <div class="toolbar">
         <button id="run-now-btn">Check for news now</button>
         <span id="run-now-status" class="hint"></span>
-        <input type="search" id="feed-search" class="search-input" placeholder="Search titles…">
+        <input type="search" id="feed-search" class="search-input" aria-label="Search titles" placeholder="Search titles…">
         <button id="feed-unread-toggle" title="Show only articles you haven't viewed">👁 Non lu</button>
         <div class="spacer"></div>
         <div class="view-toggle" id="size-toggle">
@@ -66,7 +70,7 @@
       <div class="toolbar">
         <button id="job-run-now-btn">Check for jobs now</button>
         <span id="job-run-now-status" class="hint"></span>
-        <input type="search" id="job-search" class="search-input" placeholder="Search titles…">
+        <input type="search" id="job-search" class="search-input" aria-label="Search titles" placeholder="Search titles…">
         <button id="job-hide-expired-toggle" title="Hide offers whose application deadline has already passed">⏰ Hide expired</button>
         <button id="job-show-hidden-toggle" title="Show offers you've hidden (pay/saved text are kept, unlike Archive)">🙈 Show hidden</button>
         <button id="job-show-archived-toggle" title="Show offers you've archived (pay/saved text are not kept)">📁 Show archived</button>
@@ -129,7 +133,7 @@
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Pay by tag</h3>
+        <h2>Pay by tag</h2>
         <p class="hint">
           Archived offers are excluded, like every other chart on this page --
           this tracks the active pipeline, not a retrospective pay archive (the
@@ -153,7 +157,7 @@
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Pay by city</h3>
+        <h2>Pay by city</h2>
         <p class="hint">
           Mean pay per city (only cities with at least one parseable pay value
           are shown). No curve here -- city is a category with no natural
@@ -163,7 +167,7 @@
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Offers by tag</h3>
+        <h2>Offers by tag</h2>
         <p class="hint">
           Same tag exclusions as Pay by tag above ("Untagged" plus the 5 tags
           hidden by default in Jobs). How many job/thesis offers fall under each tag in total, archived
@@ -175,13 +179,13 @@
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Volume by source</h3>
+        <h2>Volume by source</h2>
         <p class="hint">How many offers each job source has contributed in total. Same "no curve, categories aren't ordered" reasoning as Offers by tag.</p>
         <div id="analysis-source-volume"></div>
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Offers over time</h3>
+        <h2>Offers over time</h2>
         <p class="hint">
           Monthly count of offers *dated* that month (each offer's own
           pub_date -- its listed posting date, or "now" as a fallback for a
@@ -193,7 +197,7 @@
       </div>
 
       <div class="card-form">
-        <h3>New jobs over time</h3>
+        <h2>New jobs over time</h2>
         <p class="hint">
           Monthly count of offers this app *first scraped* that month
           (first_seen_at -- never defaulted or backfilled, always the real
@@ -221,32 +225,40 @@
       </div>
       <div id="group-filter-chips" class="chips"></div>
       <div id="add-source-form" style="display:none; margin-bottom: 20px;"></div>
-      <h3>Websites</h3>
+      <h2>Websites</h2>
       <div id="website-sources"></div>
-      <h3>Newsletters</h3>
+      <h2>Newsletters</h2>
       <div id="newsletter-sources"></div>
-      <h3>Social Media</h3>
+      <h2>Social Media</h2>
       <div id="social-sources"></div>
-      <h3>Job/Thesis Offers</h3>
+      <h2>Job/Thesis Offers</h2>
       <div id="job-sources"></div>
     </section>
 
-    <!-- SETTINGS -->
-    <section id="view-settings" class="view">
+    <!-- ADMIN: Settings, Debug, Bêta, Correctifs -->
+    <section id="view-admin" class="view">
+      <div class="admin-tabs" role="tablist" aria-label="Administration">
+        <button class="admin-tab active" role="tab" data-panel="settings" id="admin-tab-settings" aria-controls="admin-settings" aria-selected="true">Settings</button>
+        <button class="admin-tab" role="tab" data-panel="debug" id="admin-tab-debug" aria-controls="admin-debug" aria-selected="false">Debug</button>
+        <button class="admin-tab" role="tab" data-panel="beta" id="admin-tab-beta" aria-controls="admin-beta" aria-selected="false">Bêta</button>
+        <button class="admin-tab" role="tab" data-panel="hotfix" id="admin-tab-hotfix" aria-controls="admin-hotfix" aria-selected="false">Correctifs</button>
+      </div>
+
+    <div id="admin-settings" class="admin-panel active" role="tabpanel" aria-labelledby="admin-tab-settings">
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Daily digest schedule</h3>
+        <h2>Daily digest schedule</h2>
         <div class="field">
-          <label>Time (24h)</label>
+          <label for="setting-hour">Time (24h)</label>
           <input type="number" id="setting-hour" min="0" max="23" style="width:70px">
           :
-          <input type="number" id="setting-minute" min="0" max="59" style="width:70px">
+          <input type="number" id="setting-minute" aria-label="Minute" min="0" max="59" style="width:70px">
         </div>
         <div class="field">
-          <label>Timezone (IANA name)</label>
+          <label for="setting-timezone">Timezone (IANA name)</label>
           <input type="text" id="setting-timezone" placeholder="Europe/Paris">
         </div>
         <div class="field">
-          <label>Discord channel ID</label>
+          <label for="setting-channel">Discord channel ID</label>
           <input type="text" id="setting-channel" placeholder="123456789012345678">
         </div>
         <button id="save-settings-btn" class="primary">Save</button>
@@ -255,10 +267,10 @@
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Email digest subscribers</h3>
+        <h2>Email digest subscribers</h2>
         <p class="hint" id="smtp-status"></p>
         <div class="field">
-          <label>Add an email</label>
+          <label for="subscribe-email">Add an email</label>
           <input type="email" id="subscribe-email" placeholder="you@example.com">
           <button id="subscribe-btn">Subscribe</button>
         </div>
@@ -266,15 +278,15 @@
       </div>
 
       <div class="card-form">
-        <h3>Job tags</h3>
+        <h2>Job tags</h2>
         <p class="hint">Job/thesis offers are auto-tagged by matching their title against each tag's keywords (first match wins, checked top to bottom). Only applies to the Jobs tab.</p>
         <div id="job-tags-list"></div>
         <div class="field" style="margin-top: 14px;">
-          <label>New tag name</label>
+          <label for="new-job-tag-name">New tag name</label>
           <input type="text" id="new-job-tag-name" placeholder="e.g. Postdoc" style="width: 200px">
         </div>
         <div class="field">
-          <label>Keywords (comma-separated)</label>
+          <label for="new-job-tag-keywords">Keywords (comma-separated)</label>
           <input type="text" id="new-job-tag-keywords" placeholder="e.g. postdoc, post-doc, postdoctoral" style="width: 100%">
         </div>
         <button id="add-job-tag-btn" class="primary">Add tag</button>
@@ -283,41 +295,75 @@
       </div>
     </section>
 
-    <!-- DEBUG -->
-    <section id="view-debug" class="view">
+    </div>
+
+    <div id="admin-debug" class="admin-panel" role="tabpanel" aria-labelledby="admin-tab-debug">
       <div class="toolbar">
         <button id="debug-refresh-btn">Refresh</button>
         <span id="debug-status" class="hint"></span>
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Process</h3>
+        <h2>Process</h2>
         <div id="debug-process"></div>
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Discord bot</h3>
+        <h2>Discord bot</h2>
         <div id="debug-discord"></div>
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Daily digest scheduler</h3>
+        <h2>Daily digest scheduler</h2>
         <div id="debug-scheduler"></div>
       </div>
 
       <div class="card-form" style="margin-bottom: 20px;">
-        <h3>Articles</h3>
+        <h2>Articles</h2>
         <div id="debug-articles"></div>
       </div>
 
       <div class="card-form">
-        <h3>Latest scraping, per source</h3>
+        <h2>Latest scraping, per source</h2>
         <p class="hint">Sources with the oldest (or no) check are listed first -- if the whole list shows "Not checked yet" or a check from days ago, the scheduler likely never ran, not just this one source.</p>
         <div id="debug-sources"></div>
       </div>
+    </div>
+
+    <div id="admin-beta" class="admin-panel" role="tabpanel" aria-labelledby="admin-tab-beta">
+      <div class="card-form">
+        <h2>Mode bêta</h2>
+        <p>Les nouveautés en cours de développement se construisent derrière ce mode : elles n'apparaissent que dans l'onglet où il est activé, jusqu'à validation.</p>
+        <p>Version actuelle : <b id="beta-version">…</b>. Mode bêta : <b id="beta-state">désactivé</b>.</p>
+        <button id="beta-toggle-btn" class="primary" type="button">Activer la bêta dans cet onglet</button>
+        <h2>Journal des versions</h2>
+        <div id="changelog-list" class="changelog"></div>
+      </div>
+    </div>
+
+    <div id="admin-hotfix" class="admin-panel" role="tabpanel" aria-labelledby="admin-tab-hotfix">
+      <div class="card-form">
+        <h2>Versions de correction</h2>
+        <p>Une version <b>x.y.z</b> ne contient que des corrections de bugs (pas de nouveauté). Version actuelle : <b id="hotfix-version">…</b>. <span id="hotfix-latest"></span></p>
+        <div id="hotfix-list" class="changelog"></div>
+        <h2>Comment un correctif arrive</h2>
+        <ol>
+          <li>Branche <code>hotfix-…</code> depuis <code>main</code> : la correction seule, avec son test.</li>
+          <li>Version <b>x.y.z</b> (z + 1) et ligne dans <code>CHANGELOG.md</code>, dans le même commit.</li>
+          <li>Fusion dans <code>main</code>, étiquette <code>news-bot-x.y.z</code>, puis déploiement (rsync, voir <code>DEPLOYMENT.md</code>).</li>
+        </ol>
+        <h2>Retour arrière</h2>
+        <p>Revenir à l'étiquette précédente (<code>news-bot-x.y</code>), refaire le rsync et reconstruire le conteneur. La base <code>data/news.db</code> n'est jamais touchée par un déploiement ; en cas de doute, la copier avant.</p>
+      </div>
+    </div>
     </section>
   </main>
 
+  <nav class="bottomnav" id="bottomnav" aria-label="Navigation principale"></nav>
+  <div class="bottomnav__backdrop" id="bottomnav-backdrop" hidden></div>
+  <div class="bottomnav__sheet" id="bottomnav-sheet" hidden></div>
+
+  <script type="module" src="/static/admin.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

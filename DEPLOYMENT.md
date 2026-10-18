@@ -243,9 +243,15 @@ cd ~/Code/News_bot
 rsync -av --exclude='.git/' --exclude='*.db*' --exclude='bin/' --exclude='lib/' \
   --exclude='lib64' --exclude='include/' --exclude='pyvenv.cfg' --exclude='__pycache__/' \
   --exclude='.claude/' --exclude='.env' --exclude='desktop/' --exclude='troy314@*' \
+  --exclude='audit/shots/' --exclude='audit/baseline/' \
   ./ myserver:~/docker/stacks/news-bot/app/
 ssh myserver 'cd ~/docker/stacks/news-bot && docker compose up -d --build && docker compose logs --tail 15 news_bot'
 ```
+
+The rsync also carries `CHANGELOG.md` and `changelog.py` (they feed `GET /api/version`
+and Admin → Bêta/Correctifs) — **bump the version and add the `CHANGELOG.md` entry in the same
+commit as any live change** (`tests/test_changelog.py` fails if they disagree). The UI-audit
+screenshots (`audit/shots`, `audit/baseline`) contain real data: never deploy or commit them.
 
 Add `-n` to the rsync first for a dry run. `data/` (the DB) is outside `app/`
 and never touched. Verify by SSH-tunnelling `127.0.0.1:8001`, or compare
