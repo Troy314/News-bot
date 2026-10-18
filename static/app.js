@@ -89,8 +89,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     if (btn.dataset.view === "jobs") loadJobs();
     if (btn.dataset.view === "analysis") loadAnalysis();
     if (btn.dataset.view === "sources") loadSources();
-    if (btn.dataset.view === "settings") loadSettings();
-    if (btn.dataset.view === "debug") loadDebug();
+    if (btn.dataset.view === "admin" && window.adminActivated) window.adminActivated();
   });
 });
 
@@ -241,14 +240,14 @@ function renderCard(article, hues, {
   const topics = allowDeadlineEdit
     ? `<span class="topics">
         ${topicsList.map((t) => `<span class="topic-tag">${escapeHtml(t)}<button class="topic-remove" data-id="${article.id}" data-topic="${escapeHtml(t)}" title="Remove this topic" aria-label="Remove ${escapeHtml(t)}"${selectMode ? " disabled" : ""}>✕</button></span>`).join("")}
-        <input type="text" class="topic-add" data-id="${article.id}" list="topic-suggestions" placeholder="+ topic" title="Add a subject topic (Enter)"${selectMode ? " disabled" : ""}>
+        <input type="text" class="topic-add" aria-label="Add a topic" data-id="${article.id}" list="topic-suggestions" placeholder="+ topic" title="Add a subject topic (Enter)"${selectMode ? " disabled" : ""}>
       </span>`
     : topicsList.map((t) => `<span class="topic-tag">${escapeHtml(t)}</span>`).join("");
   const jobTag = allowDeadlineEdit
     ? `<span class="job-tags">
         ${jobTagsList.map((t) => `<span class="job-tag">${escapeHtml(t)}<button class="job-tag-remove" data-id="${article.id}" data-tag="${escapeHtml(t)}" title="Remove this tag" aria-label="Remove ${escapeHtml(t)}"${selectMode ? " disabled" : ""}>✕</button></span>`).join("")}
         ${jobTagsList.length === 0 ? `<span class="job-tag job-tag--none">Untagged</span>` : ""}
-        <select class="job-tag-add" data-id="${article.id}" title="Add a topic tag"${selectMode ? " disabled" : ""}>
+        <select class="job-tag-add" aria-label="Add a tag" data-id="${article.id}" title="Add a topic tag"${selectMode ? " disabled" : ""}>
           <option value="">+ tag</option>
           ${(state.jobTags || []).filter((t) => !jobTagsList.includes(t.name))
             .map((t) => `<option value="${escapeHtml(t.name)}">${escapeHtml(t.name)}</option>`).join("")}
@@ -359,7 +358,7 @@ function renderCard(article, hues, {
   // renderTagChips' activeSet check elsewhere in this file) so re-
   // rendering after a selection change doesn't visually reset it.
   const selectCheckbox = selectMode
-    ? `<input type="checkbox" class="job-select" data-id="${article.id}"${selectedSet?.has(article.id) ? " checked" : ""}>`
+    ? `<input type="checkbox" class="job-select" aria-label="Select offer" data-id="${article.id}"${selectedSet?.has(article.id) ? " checked" : ""}>`
     : "";
   // The <a> itself is always a plain, real link (href + target="_blank")
   // regardless of openEmbedded -- hover preview, right-click "copy link"/
@@ -385,7 +384,7 @@ function renderCard(article, hues, {
       ${favBtn}
       ${image}
       <div class="card-body">
-        <h3>${titleLink}</h3>
+        <h2>${titleLink}</h2>
         ${excerpt}
         <div class="card-meta">
           <span class="tag" style="--hue:${hue}">${escapeHtml(article.source_name)}</span>
@@ -2444,7 +2443,7 @@ function renderSourceRow(s) {
     <div class="source-row ${s.enabled ? "" : "disabled"}" data-status="${s.last_status || "unchecked"}" data-group="${escapeHtml(s.group_tag || "")}">
       <span class="name">${escapeHtml(s.name)}</span>
       <span class="meta">${s.kind}${s.user_agent ? " · custom UA" : ""}</span>
-      <input type="text" class="group-input" data-id="${s.id}" list="existing-groups-inline"
+      <input type="text" class="group-input" aria-label="Group" data-id="${s.id}" list="existing-groups-inline"
              value="${escapeHtml(s.group_tag || "")}" placeholder="Group...">
       ${renderHealthBadge(s)}
       <button class="edit-btn" data-id="${s.id}">Edit</button>
@@ -2919,8 +2918,8 @@ async function loadJobTags() {
             <button class="move-job-tag-btn" data-dir="up" ${i === 0 ? "disabled" : ""} title="Higher priority">&#9650;</button>
             <button class="move-job-tag-btn" data-dir="down" ${i === tags.length - 1 ? "disabled" : ""} title="Lower priority">&#9660;</button>
           </div>
-          <input type="text" class="job-tag-name" value="${escapeHtml(t.name)}" style="width: 140px">
-          <input type="text" class="job-tag-keywords" value="${escapeHtml(t.keywords.join(", "))}" style="flex: 1" placeholder="keyword1, keyword2, ...">
+          <input type="text" class="job-tag-name" aria-label="Tag name" value="${escapeHtml(t.name)}" style="width: 140px">
+          <input type="text" class="job-tag-keywords" aria-label="Tag keywords" value="${escapeHtml(t.keywords.join(", "))}" style="flex: 1" placeholder="keyword1, keyword2, ...">
           <button class="save-job-tag-btn">Save</button>
           <button class="danger delete-job-tag-btn">Delete</button>
         </div>`).join("")

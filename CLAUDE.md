@@ -680,6 +680,26 @@ and recreating the `Loop` object mid-run) for a value that changes rarely
 — the Settings tab's hint text says this explicitly, don't remove it
 without also fixing the underlying limitation.
 
+## Versions, Admin page, beta mode, phone menu, UI audit (webapp-craft)
+
+- **Version x.y.z + `CHANGELOG.md`**: `## x.y[.z] — date` (x.y written without `.0`; z = bug-fix only).
+  `changelog.py` (copy of `topinambours/shared-ui/python/changelog.py`) exposes `GET /api/version`
+  (`{version, releases}`), mounted in `web.py`. `tests/test_changelog.py` (`bin/python -m unittest
+  discover -s tests`) fails when the top release has no items or `CURRENT` is stale — **bump `CURRENT` there,
+  add the changelog entry, in the same commit as any live change.**
+- **Admin tab** (`#view-admin`): sub-tabs Settings, Debug (the former top-level tabs, same element ids),
+  **Bêta** (version, changelog, per-tab beta switch) and **Correctifs** (hotfix procedure, x.y.z list).
+  Logic in `static/admin.js` (ES module); `static/beta.js` is a copy of `shared-ui/src/beta.js` (never edit it
+  here — change the kit). New behaviour in the live app goes behind `isBeta()` / `html[data-beta="on"]`.
+- **Phone (≤ 640 px)**: the top tab bar is hidden and a bottom menu (Feed, Favorites, Jobs, Sources, Plus →
+  Data Analysis, Admin) takes over; it just clicks the hidden `.tab-btn`, so tab loading logic stays in `app.js`.
+- **UI audit** (`audit/`): `audit/serve-test.sh start` runs the web app only, on a throw-away COPY of
+  `news.db` (port 8010; the real DB is never touched), then
+  `PLAYWRIGHT_PATH=<node_modules/playwright> node audit/layout-audit.cjs --base http://127.0.0.1:8010 --real-api --a11y --widths 320,390,1280 --baseline audit/baseline`.
+  `audit/shots` and `audit/baseline` hold real data → gitignored, never deployed. Stop with `audit/serve-test.sh stop`.
+  Layout rules: `min-width: 0` on flex/grid children, grids use `minmax(min(Npx, 100%), 1fr)`, every input has a label/`aria-label`,
+  headings go h1 → h2.
+
 ## Web UI (`static/`)
 
 Vanilla JS, no build step, no framework — matches this project's existing

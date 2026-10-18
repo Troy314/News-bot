@@ -23,12 +23,15 @@ from pydantic import BaseModel, EmailStr
 
 import db
 import digest
+from changelog import version_router
 import mailer
 import scraper
 
 logger = logging.getLogger("news_bot.web")
 
 app = FastAPI(title="News Bot")
+# GET /api/version : version + journal des versions (CHANGELOG.md à la racine de l'application). Pas d'authentification propre à l'app (Cloudflare Access devant).
+app.include_router(version_router(Path(__file__).resolve().parent / "CHANGELOG.md"))
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 

@@ -6,3 +6,5 @@ lib/
 lib64
 pyvenv.cfg
 __pycache__/
+audit/shots
+audit/baseline
