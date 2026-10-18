@@ -3101,6 +3101,8 @@ document.getElementById("debug-refresh-btn").addEventListener("click", loadDebug
 const FEED_SIZE_KEY = "newsbot-feed-size";
 
 function applyFeedSize(size) {
+  // "list" (full-width rows with the abstract) is beta-only for now.
+  if (size === "list" && document.documentElement.dataset.beta !== "on") size = "medium";
   document.getElementById("feed-days").dataset.size = size;
   document.querySelectorAll("#size-toggle .view-toggle-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.size === size);
