@@ -922,8 +922,22 @@ def _histogram(values: list[float], bin_size: float = 500) -> list[dict]:
     ]
 
 
+def _wanted_tags(tags: str) -> set[str] | None:
+    """`tags` query param of the analysis routes: comma-separated job tag names
+    (e.g. "PhD,Outreach"). Blank = no filter (every offer), the pre-existing
+    behaviour. An offer matches when ANY of its effective tags is requested."""
+    wanted = {t.strip() for t in (tags or "").split(",") if t.strip()}
+    return wanted or None
+
+
+def _row_has_tag(row, wanted: set[str] | None) -> bool:
+    if wanted is None:
+        return True
+    return bool(wanted & set(_effective_job_tags(row["job_tags"], row["job_tag"]) or ["Untagged"]))
+
+
 @app.get("/api/jobs/stats")
-def job_stats(include_archived: bool = True, bin_size: float = 500):
+def job_stats(include_archived: bool = True, bin_size: float = 500, tags: str = ""):
     """Aggregate remuneration stats grouped by job_tag -- count of
     category="job" articles per tag, how many of those actually have a
     remuneration value at all (extracted or manual), summary statistics
@@ -971,12 +985,16 @@ def job_stats(include_archived: bool = True, bin_size: float = 500):
     finally:
         conn.close()
 
+    wanted = _wanted_tags(tags)
     by_tag: dict[str, dict] = {}
     for row in rows:
         # An offer counts once under each of its tags, so per-tag totals can
         # sum to more than the number of offers -- a multi-tagged job is
-        # genuinely part of both groups.
+        # genuinely part of both groups. With a `tags` filter only the
+        # requested tags get a bucket.
         for tag in _effective_job_tags(row["job_tags"], row["job_tag"]) or ["Untagged"]:
+            if wanted is not None and tag not in wanted:
+                continue
             bucket = by_tag.setdefault(tag, {"tag": tag, "count": 0, "with_remuneration": 0, "values": []})
             bucket["count"] += 1
             if row["remuneration"]:
@@ -1012,7 +1030,7 @@ def _pay_summary_stats(values: list[float]) -> dict:
 
 
 @app.get("/api/jobs/pay-by-city")
-def job_pay_by_city(include_archived: bool = True):
+def job_pay_by_city(include_archived: bool = True, tags: str = ""):
     """Same shape as job_stats, grouped by `city` instead of `job_tag` --
     requested directly ("add Pay by city") now that city is tracked at
     all (see "Job locations" elsewhere in this file). No histogram here
@@ -1029,7 +1047,7 @@ def job_pay_by_city(include_archived: bool = True):
     conn = db.get_conn()
     try:
         query = (
-            "SELECT articles.city, articles.remuneration FROM articles "
+            "SELECT articles.city, articles.remuneration, articles.job_tag, articles.job_tags FROM articles "
             "JOIN sources ON sources.id = articles.source_id "
             "WHERE sources.category = 'job' AND articles.city IS NOT NULL AND articles.city != ''"
         )
@@ -1039,8 +1057,11 @@ def job_pay_by_city(include_archived: bool = True):
     finally:
         conn.close()
 
+    wanted = _wanted_tags(tags)
     by_city: dict[str, dict] = {}
     for row in rows:
+        if not _row_has_tag(row, wanted):
+            continue
         bucket = by_city.setdefault(row["city"], {"city": row["city"], "count": 0, "with_remuneration": 0, "values": []})
         bucket["count"] += 1
         if row["remuneration"]:
@@ -1077,7 +1098,7 @@ def _time_bucket(iso_str: str, granularity: str) -> str:
 @app.get("/api/jobs/analysis")
 
 
-def jobs_analysis(granularity: str = "month"):
+def jobs_analysis(granularity: str = "month", tags: str = ""):
     """Job-side *volume* analytics for the dedicated Data Analysis page --
     how many offers per source, a period-by-period posting count broken
     down by tag, and a separate period-by-period *discovery* count.
@@ -1109,10 +1130,9 @@ def jobs_analysis(granularity: str = "month"):
     conn = db.get_conn()
     try:
         source_rows = conn.execute(
-            "SELECT sources.name AS source, COUNT(*) AS count FROM articles "
+            "SELECT sources.name AS source, articles.job_tag, articles.job_tags FROM articles "
             "JOIN sources ON sources.id = articles.source_id "
-            "WHERE sources.category = 'job' AND articles.archived = 0 "
-            "GROUP BY sources.name ORDER BY count DESC"
+            "WHERE sources.category = 'job' AND articles.archived = 0"
         ).fetchall()
         time_rows = conn.execute(
             "SELECT articles.pub_date, articles.job_tag, articles.job_tags "
@@ -1121,14 +1141,21 @@ def jobs_analysis(granularity: str = "month"):
             "AND articles.pub_date IS NOT NULL"
         ).fetchall()
         new_jobs_rows = conn.execute(
-            "SELECT articles.first_seen_at FROM articles "
+            "SELECT articles.first_seen_at, articles.job_tag, articles.job_tags FROM articles "
             "JOIN sources ON sources.id = articles.source_id "
             "WHERE sources.category = 'job' AND articles.archived = 0"
         ).fetchall()
     finally:
         conn.close()
 
-    by_source = [{"source": r["source"], "count": r["count"]} for r in source_rows]
+    wanted = _wanted_tags(tags)
+    source_counts: dict[str, int] = {}
+    for r in source_rows:
+        if _row_has_tag(r, wanted):
+            source_counts[r["source"]] = source_counts.get(r["source"], 0) + 1
+    by_source = [{"source": n, "count": c} for n, c in sorted(source_counts.items(), key=lambda x: -x[1])]
+    time_rows = [r for r in time_rows if _row_has_tag(r, wanted)]
+    new_jobs_rows = [r for r in new_jobs_rows if _row_has_tag(r, wanted)]
 
     by_period: dict[str, dict] = {}
     for row in time_rows:

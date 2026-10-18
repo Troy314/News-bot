@@ -122,6 +122,11 @@
     <!-- DATA ANALYSIS (Jobs-side analytics: pay stats, volume by source, offers over time) -->
     <section id="view-analysis" class="view">
       <div class="toolbar">
+        <div class="view-toggle beta-only" id="analysis-focus" role="group" aria-label="Offer type">
+          <button class="view-toggle-btn" data-focus="phd" title="Only PhD offers">PhD</button>
+          <button class="view-toggle-btn" data-focus="outreach" title="Only Outreach offers">Outreach</button>
+          <button class="view-toggle-btn active" data-focus="both" title="PhD and Outreach offers">Both</button>
+        </div>
         <button id="analysis-refresh-btn">Refresh</button>
         <label class="hint" for="analysis-bin-size" style="margin-left: 10px;">Pay bin (€)</label>
         <input type="number" id="analysis-bin-size" min="1" step="100" style="width: 90px">
@@ -133,6 +138,8 @@
         </select>
         <span id="analysis-status" class="hint"></span>
       </div>
+
+      <div id="analysis-kpis" class="kpis"></div>
 
       <div class="card-form" style="margin-bottom: 20px;">
         <h2>Pay by tag</h2>

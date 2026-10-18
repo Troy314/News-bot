@@ -2049,6 +2049,15 @@ function loadAnalysisGranularity() {
   return ["week", "month", "quarter"].includes(stored) ? stored : "month";
 }
 
+// Beta: PhD / Outreach / Both selector (Both = the two tags together). Without
+// beta the page behaves as before (no tags filter).
+const ANALYSIS_FOCUS_KEY = "newsbot-analysis-focus";
+const ANALYSIS_FOCUS_TAGS = { phd: "PhD", outreach: "Outreach", both: "PhD,Outreach" };
+let analysisFocus = ["phd", "outreach", "both"].includes(localStorage.getItem(ANALYSIS_FOCUS_KEY))
+  ? localStorage.getItem(ANALYSIS_FOCUS_KEY) : "both";
+const analysisBeta = () => document.documentElement.dataset.beta === "on";
+const analysisTagsParam = () => (analysisBeta() ? `&tags=${encodeURIComponent(ANALYSIS_FOCUS_TAGS[analysisFocus])}` : "");
+
 let analysisBinSize = loadAnalysisBinSize();
 let analysisGranularity = loadAnalysisGranularity();
 
@@ -2082,13 +2091,33 @@ async function loadAnalysis() {
     // archived) deliberately does. See job_stats'/job_pay_by_city's own
     // docstrings for why the two surfaces disagree on purpose.
     const [statsRaw, analysis, payByCity] = await Promise.all([
-      api(`/api/jobs/stats?include_archived=0&bin_size=${analysisBinSize}`),
-      api(`/api/jobs/analysis?granularity=${analysisGranularity}`),
-      api("/api/jobs/pay-by-city?include_archived=0"),
+      api(`/api/jobs/stats?include_archived=0&bin_size=${analysisBinSize}${analysisTagsParam()}`),
+      api(`/api/jobs/analysis?granularity=${analysisGranularity}${analysisTagsParam()}`),
+      api(`/api/jobs/pay-by-city?include_archived=0${analysisTagsParam()}`),
     ]);
     status.textContent = "";
 
     const stats = excludeLowSignalTags(statsRaw, "tag");
+
+    // --- Beta: headline numbers for the selected focus ---
+    const kpis = document.getElementById("analysis-kpis");
+    if (analysisBeta()) {
+      const offers = analysis.by_source.reduce((n, s) => n + s.count, 0);
+      const withPay = stats.reduce((n, s) => n + s.with_remuneration, 0);
+      const priced = stats.filter((s) => s.avg !== null && s.with_remuneration > 0);
+      const meanPay = priced.length
+        ? priced.reduce((n, s) => n + s.avg * s.with_remuneration, 0) / priced.reduce((n, s) => n + s.with_remuneration, 0)
+        : null;
+      const sources = analysis.by_source.length;
+      kpis.innerHTML = [
+        ["Offers", offers.toLocaleString()],
+        ["Sources", sources.toLocaleString()],
+        ["With pay", withPay.toLocaleString()],
+        ["Mean pay", meanPay === null ? "—" : Math.round(meanPay).toLocaleString() + " €/yr"],
+      ].map(([k, v]) => `<div class="kpi"><div class="kpi__v">${v}</div><div class="kpi__k">${k}</div></div>`).join("");
+    } else {
+      kpis.innerHTML = "";
+    }
 
     // --- Pay by tag: one full-width histogram + Gaussian fit per tag ---
     const withPay = stats.filter((s) => s.avg !== null && s.histogram && s.histogram.length);
@@ -2153,6 +2182,17 @@ async function loadAnalysis() {
 }
 
 document.getElementById("analysis-refresh-btn").addEventListener("click", loadAnalysis);
+
+function syncAnalysisFocus() {
+  document.querySelectorAll("#analysis-focus .view-toggle-btn").forEach((b) => b.classList.toggle("active", b.dataset.focus === analysisFocus));
+}
+syncAnalysisFocus();
+document.querySelectorAll("#analysis-focus .view-toggle-btn").forEach((b) => b.addEventListener("click", () => {
+  analysisFocus = b.dataset.focus;
+  try { localStorage.setItem(ANALYSIS_FOCUS_KEY, analysisFocus); } catch (e) { /* optional */ }
+  syncAnalysisFocus();
+  loadAnalysis();
+}));
 
 document.getElementById("analysis-bin-size").value = analysisBinSize;
 document.getElementById("analysis-granularity").value = analysisGranularity;
@@ -3248,3 +3288,9 @@ document.addEventListener("click", (e) => {
 
 applyFeedSize(localStorage.getItem(FEED_SIZE_KEY) || "medium");
 loadFeed();
+
+// Beta analysis page: the long explanations are clamped to two lines; click to expand.
+document.getElementById("view-analysis").addEventListener("click", (e) => {
+  const hint = e.target.closest(".card-form > .hint");
+  if (hint) hint.classList.toggle("expanded");
+});
