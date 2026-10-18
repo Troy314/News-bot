@@ -695,6 +695,8 @@ without also fixing the underlying limitation.
   `html[data-beta="on"]` (always dark, flat tabs, compact 84px-image cards, source dot + plain meta text instead of
   badges, hairline day headings, underlined Admin tabs, bar-above-label bottom menu). Reachable only via Admin → Bêta.
   Approved → drop the `html[data-beta="on"]` prefix / merge into `style.css`, bump x.y, add a CHANGELOG entry.
+  Feed has a 4th display mode **List** (`data-size="list"`, beta-only button `.beta-only`): one article per row on the full
+  width, abstract (`excerpt`) shown in full; falls back to Medium when beta is off. Only RSS sources have an excerpt.
   Not ported yet: Feed toolbar "More ▾" menu (digest/RSS/card size still inline), list-style Jobs rows.
   Audit it with `--views audit/views-beta.json`.
 - **Phone (≤ 640 px)**: the top tab bar is hidden and a bottom menu (Feed, Favorites, Jobs, Sources, Plus →
