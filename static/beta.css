@@ -149,3 +149,15 @@ html[data-beta="on"] #view-analysis .toolbar { gap: 8px; }
 html[data-beta="on"] #view-analysis .card-form > .hint { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; cursor: pointer; margin: 0 0 10px; }
 html[data-beta="on"] #view-analysis .card-form > .hint.expanded { -webkit-line-clamp: unset; }
 html[data-beta="on"] #view-analysis .empty-state { padding: 28px 12px; }
+
+/* Favorites: folder picker and remove button to the right of each card */
+.fav-actions { display: contents; }
+html[data-beta="on"] #favorites-grid > div { display: flex; align-items: flex-start; gap: 10px; }
+html[data-beta="on"] #favorites-grid > div > .card { flex: 1 1 auto; min-width: 0; }
+html[data-beta="on"] .fav-actions { display: flex; flex-direction: column; gap: 8px; flex: none; width: 168px; }
+html[data-beta="on"] .fav-actions select, html[data-beta="on"] .fav-actions button { width: 100%; }
+@media (max-width: 640px) {
+  html[data-beta="on"] #favorites-grid > div { flex-direction: column; align-items: stretch; }
+  html[data-beta="on"] .fav-actions { flex-direction: row; width: auto; }
+  html[data-beta="on"] .fav-actions > * { flex: 1 1 0; min-width: 0; }
+}

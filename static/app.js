@@ -2412,11 +2412,13 @@ async function loadFavoritesGrid() {
   grid.innerHTML = favorites.map((a) => `
     <div>
       ${renderCard(a, hues, { showFavoriteToggle: false })}
+      <div class="fav-actions">
       <select class="folder-picker" data-id="${a.id}">
         <option value="">No folder</option>
         ${state.folders.map((f) => `<option value="${f.id}" ${f.id === a.folder_id ? "selected" : ""}>${escapeHtml(f.name)}</option>`).join("")}
       </select>
       <button class="unfav-btn" data-id="${a.id}">Remove from favorites</button>
+      </div>
     </div>
   `).join("");
 
