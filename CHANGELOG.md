@@ -4,6 +4,12 @@ Format : `## x.y — date` (ou `## x.y.z` pour une version qui ne contient que d
 **y** à chaque lot de nouveautés mis en service, **z** à chaque version de corrections. Les nouveautés en cours de développement ne sont pas listées ici tant qu'elles sont
 en mode bêta (Admin → Bêta) ; elles entrent dans la version qui les met en service. (Historique reconstitué le 2026-10-18 à partir des dates du dépôt.)
 
+## 2.0 — 2026-10-18
+- **Nouveau look « Graphite »** : thème sombre, onglets plats, cartes compactes (pastille de couleur pour la source au lieu des badges), titres de jour avec un trait fin, menu du bas sur téléphone avec un trait au-dessus de l'onglet actif.
+- Feed : nouveau mode d'affichage **Liste** (chaque article sur toute la largeur, avec son résumé et une vignette à sa taille).
+- Favorites : affichage en liste uniquement ; le choix du dossier et « Remove from favorites » sont à droite de la carte.
+- Data Analysis : boutons **PhD / Outreach / Both** qui filtrent tous les graphiques, bandeau de chiffres clés, graphiques sur deux colonnes.
+
 ## 1.3 — 2026-10-18
 - **Admin** : un onglet regroupe Settings, Debug, **Bêta** (mode bêta, version, journal des versions) et **Correctifs** (versions de correction x.y.z, procédure, retour arrière).
 - Téléphone : **menu en bas de l'écran** (Feed, Favorites, Jobs, Sources, Plus) à la place de la barre d'onglets qui débordait de l'écran.
