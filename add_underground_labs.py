@@ -11,6 +11,13 @@ SOURCES = [
     {"name": "Kamioka (ICRR)", "kind": "rss", "url": "https://www.icrr.u-tokyo.ac.jp/en/news/feed/"},
     {"name": "LSC Canfranc", "kind": "rss", "url": "https://lsc-canfranc.es/en/feed/"},
     {"name": "SUPL", "kind": "rss", "url": "https://www.supl.org.au/feed/"},
+    {"name": "SNOLAB", "kind": "rss", "url": "https://www.snolab.ca/news/feed/"},
+    {
+        "name": "CJPL", "kind": "css", "url": "https://cjpl.tsinghua.edu.cn/",
+        "article_selector": "div.newsK", "title_selector": "div.newstxt a",
+        "link_selector": "div.newstxt a", "base_url": "https://cjpl.tsinghua.edu.cn",
+        "image_selector": "img",
+    },
     {
         "name": "LNGS", "kind": "css", "url": "https://www.lngs.infn.it/en/news",
         "article_selector": "div.item", "title_selector": "h4 a", "link_selector": "h4 a",
