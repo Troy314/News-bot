@@ -4,6 +4,11 @@ Format : `## x.y — date` (ou `## x.y.z` pour une version qui ne contient que d
 **y** à chaque lot de nouveautés mis en service, **z** à chaque version de corrections. Les nouveautés en cours de développement ne sont pas listées ici tant qu'elles sont
 en mode bêta (Admin → Bêta) ; elles entrent dans la version qui les met en service. (Historique reconstitué le 2026-10-18 à partir des dates du dépôt.)
 
+## 2.1 — 2026-11-08
+- Jobs : les offres de thèse (PhD) qui portent aussi une étiquette masquée (Post-Doc, Fellowship...) ne disparaissent plus ; le calendrier des dates limites a des jours de même largeur.
+- Favorites : pastilles et boutons « + » de même taille.
+- Nouvelles sources : laboratoires souterrains (Kamioka, Canfranc, SUPL, SNOLAB, CJPL, LNGS, SURF) et FCC PED. Meilleure détection de l'encodage des pages qui ne le déclarent pas.
+
 ## 2.0 — 2026-10-18
 - **Nouveau look « Graphite »** : thème sombre, onglets plats, cartes compactes (pastille de couleur pour la source au lieu des badges), titres de jour avec un trait fin, menu du bas sur téléphone avec un trait au-dessus de l'onglet actif.
 - Feed : nouveau mode d'affichage **Liste** (chaque article sur toute la largeur, avec son résumé et une vignette à sa taille).
