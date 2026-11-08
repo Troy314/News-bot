@@ -330,7 +330,13 @@ def _fetch(url: str, user_agent: str = USER_AGENT, timeout: int = REQUEST_TIMEOU
 
 def fetch_html(url: str, user_agent: str = USER_AGENT, quiet: bool = False) -> str | None:
     resp = _fetch(url, user_agent, quiet=quiet)
-    return resp.text if resp else None
+    if not resp:
+        return None
+    # A Content-Type without a charset makes requests assume ISO-8859-1, which
+    # garbles UTF-8 pages (fcc-ped.web.cern.ch titles); sniff the body instead.
+    if "charset" not in resp.headers.get("content-type", "").lower():
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    return resp.text
 
 
 def fetch_bytes(url: str, user_agent: str = USER_AGENT, quiet: bool = False) -> bytes | None:

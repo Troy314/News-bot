@@ -1,4 +1,4 @@
-"""Adds the underground-laboratory news sources via the running app's API.
+"""Adds the underground-laboratory (and FCC PED) news sources via the running app's API.
 Safe to re-run (409 = already exists). Usage: bin/python add_underground_labs.py [base_url]"""
 import sys
 
@@ -17,6 +17,12 @@ SOURCES = [
         "article_selector": "div.newsK", "title_selector": "div.newstxt a",
         "link_selector": "div.newstxt a", "base_url": "https://cjpl.tsinghua.edu.cn",
         "image_selector": "img",
+    },
+    {
+        "name": "FCC PED", "kind": "css", "url": "https://fcc-ped.web.cern.ch/ped-news-feed/",
+        "group_tag": "Experiments", "article_selector": "li.wp-block-post",
+        "title_selector": "h2.wp-block-post-title a", "link_selector": "h2.wp-block-post-title a",
+        "base_url": "https://fcc-ped.web.cern.ch", "date_selector": "time", "image_selector": "img",
     },
     {
         "name": "LNGS", "kind": "css", "url": "https://www.lngs.infn.it/en/news",
